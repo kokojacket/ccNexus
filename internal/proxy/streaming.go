@@ -65,8 +65,9 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 	}
 
 	scanner := bufio.NewScanner(reader)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
+	// Increase buffer sizes to handle large SSE events (e.g., large file reads in tool calls)
+	buf := make([]byte, 0, 128*1024)   // 128KB initial buffer (was 64KB)
+	scanner.Buffer(buf, 2*1024*1024)   // 2MB max buffer (was 1MB)
 
 	var inputTokens, outputTokens int
 	var buffer bytes.Buffer
@@ -209,11 +210,42 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 	}
 
 	if err := scanner.Err(); err != nil {
-		logger.Error("[%s] Scanner error: %v", endpoint.Name, err)
+		errMsg := err.Error()
+		// Check if it's an HTTP/2 stream error
+		if strings.Contains(errMsg, "stream error") || strings.Contains(errMsg, "INTERNAL_ERROR") {
+			requestSize := len(bodyBytes)
+			sizeStr := formatRequestSize(requestSize)
+			logger.Error("[%s] HTTP/2 stream error (Request size: %s / %d bytes): %v",
+				endpoint.Name, sizeStr, requestSize, err)
+
+			// Provide context based on request size
+			if requestSize > 100*1024 { // > 100KB
+				logger.Warn("[%s] Large request detected (%s). Consider: 1) Reading fewer files at once, 2) Using smaller code sections, 3) Breaking task into smaller requests",
+					endpoint.Name, sizeStr)
+			} else {
+				logger.Warn("[%s] This error may occur due to upstream server limitations or network issues.", endpoint.Name)
+			}
+		} else {
+			logger.Error("[%s] Scanner error: %v", endpoint.Name, err)
+		}
 	}
 
 	resp.Body.Close()
 	return inputTokens, outputTokens, outputText.String()
+}
+
+// formatRequestSize formats byte size into human-readable string
+func formatRequestSize(bytes int) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 // transformStreamEvent transforms a single SSE event

@@ -18,13 +18,19 @@ import (
 // createHTTPClient creates an HTTP client with optional proxy support
 func (e *EndpointService) createHTTPClient(timeout time.Duration) *http.Client {
     // Always create client with proper transport configuration
+    // Enhanced for large SSE streaming and HTTP/2 support
     client := &http.Client{
         Timeout: timeout,
         Transport: &http.Transport{
-            MaxIdleConns:        100,
-            MaxIdleConnsPerHost: 10,
-            IdleConnTimeout:     90 * time.Second,
-            TLSHandshakeTimeout: 10 * time.Second,
+            MaxIdleConns:           100,
+            MaxIdleConnsPerHost:    10,
+            IdleConnTimeout:        90 * time.Second,
+            TLSHandshakeTimeout:    10 * time.Second,
+            ExpectContinueTimeout:  1 * time.Second,
+            ResponseHeaderTimeout:  30 * time.Second,
+            WriteBufferSize:        128 * 1024, // 128KB write buffer
+            ReadBufferSize:         128 * 1024, // 128KB read buffer
+            MaxResponseHeaderBytes: 64 * 1024,  // 64KB max response headers
         },
     }
 
