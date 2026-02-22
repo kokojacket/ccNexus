@@ -12,6 +12,7 @@ import (
 
 	"github.com/lich0821/ccNexus/internal/config"
 	"github.com/lich0821/ccNexus/internal/logger"
+	"github.com/lich0821/ccNexus/internal/tokencount"
 	"github.com/lich0821/ccNexus/internal/transformer"
 )
 
@@ -85,6 +86,24 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 
 		if strings.Contains(line, "data: [DONE]") {
 			streamDone = true
+
+			// Token Usage Fallback: Inject message_delta with estimated output_tokens before [DONE]
+			if outputTokens == 0 && outputText.Len() > 0 {
+				outputTokens = tokencount.EstimateOutputTokens(outputText.String())
+				logger.Debug("[%s] Token fallback before [DONE]: estimated output_tokens=%d", endpoint.Name, outputTokens)
+
+				// Update stream context for transformer fallback
+				if streamCtx != nil {
+					streamCtx.OutputTokens = outputTokens
+				}
+
+				// Inject message_delta event with usage
+				deltaEvent := fmt.Sprintf("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":%d}}\n\n", outputTokens)
+				if _, writeErr := w.Write([]byte(deltaEvent)); writeErr == nil {
+					flusher.Flush()
+				}
+			}
+
 			buffer.WriteString(line + "\n")
 			eventData := buffer.Bytes()
 			logger.DebugLog("[%s] SSE Event #%d (Original): %s", endpoint.Name, eventCount+1, string(eventData))
@@ -104,6 +123,24 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 			eventCount++
 			eventData := buffer.Bytes()
 			logger.DebugLog("[%s] SSE Event #%d (Original): %s", endpoint.Name, eventCount, string(eventData))
+
+			// Check if this is a message_stop event (Token Usage Fallback)
+			isMessageStop := p.isMessageStopEvent(eventData)
+			if isMessageStop && outputTokens == 0 && outputText.Len() > 0 {
+				outputTokens = tokencount.EstimateOutputTokens(outputText.String())
+				logger.Debug("[%s] Token fallback before message_stop: estimated output_tokens=%d", endpoint.Name, outputTokens)
+
+				// Update stream context for transformer fallback
+				if streamCtx != nil {
+					streamCtx.OutputTokens = outputTokens
+				}
+
+				// Inject message_delta event with usage before message_stop
+				deltaEvent := fmt.Sprintf("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":%d}}\n\n", outputTokens)
+				if _, writeErr := w.Write([]byte(deltaEvent)); writeErr == nil {
+					flusher.Flush()
+				}
+			}
 
 			transformedEvent, err := p.transformStreamEvent(eventData, trans, transformerName, streamCtx)
 			if err != nil {
@@ -211,6 +248,7 @@ func (p *Proxy) extractTokensFromEvent(eventData []byte, inputTokens, outputToke
 }
 
 // extractTextFromEvent extracts text content from transformed event
+// Enhanced to support both delta.text and content_block_delta formats
 func (p *Proxy) extractTextFromEvent(transformedEvent []byte, outputText *strings.Builder) {
 	scanner := bufio.NewScanner(bytes.NewReader(transformedEvent))
 	for scanner.Scan() {
@@ -225,12 +263,47 @@ func (p *Proxy) extractTextFromEvent(transformedEvent []byte, outputText *string
 			continue
 		}
 
+		eventType, _ := event["type"].(string)
+
+		// Handle content_block_delta format (from some third-party APIs)
+		if eventType == "content_block_delta" {
+			if delta, ok := event["delta"].(map[string]interface{}); ok {
+				if text, ok := delta["text"].(string); ok {
+					outputText.WriteString(text)
+				}
+			}
+		}
+
+		// Handle standard delta.text format
 		if delta, ok := event["delta"].(map[string]interface{}); ok {
 			if text, ok := delta["text"].(string); ok {
 				outputText.WriteString(text)
 			}
 		}
 	}
+}
+
+// isMessageStopEvent checks if the event is a message_stop event
+func (p *Proxy) isMessageStopEvent(eventData []byte) bool {
+	scanner := bufio.NewScanner(bytes.NewReader(eventData))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+
+		jsonData := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		var event map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonData), &event); err != nil {
+			continue
+		}
+
+		eventType, _ := event["type"].(string)
+		if eventType == "message_stop" {
+			return true
+		}
+	}
+	return false
 }
 
 // decompressGzip decompresses gzip-encoded response body
