@@ -7,6 +7,7 @@ import (
     "io"
     "net/http"
     "strings"
+    "sync"
     "time"
 
     "github.com/lich0821/ccNexus/internal/config"
@@ -635,51 +636,79 @@ func (e *EndpointService) testResult(success bool, status, method, message strin
 }
 
 // TestAllEndpointsZeroCost tests all endpoints using zero-cost methods only
+// Uses concurrent testing with limited parallelism for optimal performance
 func (e *EndpointService) TestAllEndpointsZeroCost() string {
     endpoints := e.config.GetEndpoints()
     results := make(map[string]string)
+    mu := &sync.Mutex{}
+
+    // Use semaphore to limit concurrent requests (max 15 concurrent)
+    const maxConcurrent = 15
+    semaphore := make(chan struct{}, maxConcurrent)
+    wg := &sync.WaitGroup{}
 
     for _, endpoint := range endpoints {
-        transformer := endpoint.Transformer
-        if transformer == "" {
-            transformer = "claude"
-        }
+        wg.Add(1)
+        go func(ep config.Endpoint) {
+            defer wg.Done()
 
-        normalizedURL := normalizeAPIUrl(endpoint.APIUrl)
-        if !strings.HasPrefix(normalizedURL, "http://") && !strings.HasPrefix(normalizedURL, "https://") {
-            normalizedURL = "https://" + normalizedURL
-        }
+            // Acquire semaphore
+            semaphore <- struct{}{}
+            defer func() { <-semaphore }()
 
-        status := "unknown"
+            // Test the endpoint
+            status := e.testSingleEndpointZeroCost(ep)
 
-        statusCode, err := e.testModelsAPI(normalizedURL, endpoint.APIKey, transformer)
-        if err == nil {
-            status = "ok"
-        } else if statusCode == 401 || statusCode == 403 {
-            status = "invalid_key"
-        } else {
-            if transformer == "claude" {
-                statusCode, err = e.testTokenCountAPI(normalizedURL, endpoint.APIKey)
-                if err == nil {
-                    status = "ok"
-                } else if statusCode == 401 || statusCode == 403 {
-                    status = "invalid_key"
-                }
-            } else if transformer == "openai" || transformer == "openai2" {
-                statusCode, err = e.testBillingAPI(normalizedURL, endpoint.APIKey)
-                if err == nil {
-                    status = "ok"
-                } else if statusCode == 401 || statusCode == 403 {
-                    status = "invalid_key"
-                }
-            }
-        }
-
-        results[endpoint.Name] = status
+            // Store result
+            mu.Lock()
+            results[ep.Name] = status
+            mu.Unlock()
+        }(endpoint)
     }
 
+    wg.Wait()
     data, _ := json.Marshal(results)
     return string(data)
+}
+
+// testSingleEndpointZeroCost tests a single endpoint using zero-cost methods
+func (e *EndpointService) testSingleEndpointZeroCost(endpoint config.Endpoint) string {
+    transformer := endpoint.Transformer
+    if transformer == "" {
+        transformer = "claude"
+    }
+
+    normalizedURL := normalizeAPIUrl(endpoint.APIUrl)
+    if !strings.HasPrefix(normalizedURL, "http://") && !strings.HasPrefix(normalizedURL, "https://") {
+        normalizedURL = "https://" + normalizedURL
+    }
+
+    status := "unknown"
+
+    statusCode, err := e.testModelsAPI(normalizedURL, endpoint.APIKey, transformer)
+    if err == nil {
+        status = "ok"
+    } else if statusCode == 401 || statusCode == 403 {
+        status = "invalid_key"
+    } else {
+        if transformer == "claude" {
+            statusCode, err = e.testTokenCountAPI(normalizedURL, endpoint.APIKey)
+            if err == nil {
+                status = "ok"
+            } else if statusCode == 401 || statusCode == 403 {
+                status = "invalid_key"
+            }
+        } else if transformer == "openai" || transformer == "openai2" {
+            statusCode, err = e.testBillingAPI(normalizedURL, endpoint.APIKey)
+            if err == nil {
+                status = "ok"
+            } else if statusCode == 401 || statusCode == 403 {
+                status = "invalid_key"
+            }
+        }
+    }
+
+    return status
 }
 
 func (e *EndpointService) testModelsAPI(apiUrl, apiKey, transformer string) (int, error) {
@@ -699,7 +728,7 @@ func (e *EndpointService) testModelsAPI(apiUrl, apiKey, transformer string) (int
         req.Header.Set("Authorization", "Bearer "+apiKey)
     }
 
-    client := e.createHTTPClient(15 * time.Second)
+    client := e.createHTTPClient(8 * time.Second)
     resp, err := client.Do(req)
     if err != nil {
         return 0, err
@@ -757,7 +786,7 @@ func (e *EndpointService) testTokenCountAPI(apiUrl, apiKey string) (int, error) 
     req.Header.Set("anthropic-version", "2023-06-01")
     req.Header.Set("anthropic-beta", "token-counting-2024-11-01")
 
-    client := e.createHTTPClient(15 * time.Second)
+    client := e.createHTTPClient(8 * time.Second)
     resp, err := client.Do(req)
     if err != nil {
         return 0, err
@@ -795,7 +824,7 @@ func (e *EndpointService) testBillingAPI(apiUrl, apiKey string) (int, error) {
 
     req.Header.Set("Authorization", "Bearer "+apiKey)
 
-    client := e.createHTTPClient(15 * time.Second)
+    client := e.createHTTPClient(8 * time.Second)
     resp, err := client.Do(req)
     if err != nil {
         return 0, err
