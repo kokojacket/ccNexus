@@ -32,6 +32,7 @@ type StatsStorage interface {
 	RecordDailyStat(stat interface{}) error
 	GetTotalStats() (int, map[string]interface{}, error)
 	GetDailyStats(endpointName, startDate, endDate string) ([]interface{}, error)
+	GetPeriodStatsAggregated(startDate, endDate string) (map[string]interface{}, error)
 }
 
 // StatRecord represents a stat record for storage
@@ -180,23 +181,122 @@ func (s *Stats) GetStats() (int, map[string]*EndpointStats) {
 	// Convert to EndpointStats format
 	result := make(map[string]*EndpointStats)
 	for name, data := range statsData {
-		// Type assert to get the actual data using reflection
-		v := reflect.ValueOf(data)
-		if v.Kind() == reflect.Ptr {
-			v = v.Elem()
-		}
-
-		result[name] = &EndpointStats{
-			Requests:     int(v.FieldByName("Requests").Int()),
-			Errors:       int(v.FieldByName("Errors").Int()),
-			InputTokens:  int(v.FieldByName("InputTokens").Int()),
-			OutputTokens: int(v.FieldByName("OutputTokens").Int()),
-			LastUsed:     time.Now(),
-			DailyHistory: make(map[string]*DailyStats),
+		// Use type assertion instead of reflection for better performance and type safety
+		stats := extractStatsData(data)
+		if stats != nil {
+			result[name] = &EndpointStats{
+				Requests:     stats.Requests,
+				Errors:       stats.Errors,
+				InputTokens:  int(stats.InputTokens),
+				OutputTokens: int(stats.OutputTokens),
+				LastUsed:     time.Now(),
+				DailyHistory: make(map[string]*DailyStats),
+			}
 		}
 	}
 
 	return totalRequests, result
+}
+
+// extractStatsData safely extracts stats data using type assertion instead of reflection
+func extractStatsData(data interface{}) *StatsData {
+	// Try direct type assertion first
+	if stats, ok := data.(*StatsData); ok {
+		return stats
+	}
+
+	// Try interface with matching methods
+	type StatsLike interface {
+		GetRequests() int
+		GetErrors() int
+		GetInputTokens() int64
+		GetOutputTokens() int64
+	}
+
+	if statsLike, ok := data.(StatsLike); ok {
+		return &StatsData{
+			Requests:     statsLike.GetRequests(),
+			Errors:       statsLike.GetErrors(),
+			InputTokens:  statsLike.GetInputTokens(),
+			OutputTokens: statsLike.GetOutputTokens(),
+		}
+	}
+
+	// Try struct with matching fields (compatibility layer)
+	type StatsStruct struct {
+		Requests     int
+		Errors       int
+		InputTokens  int64
+		OutputTokens int64
+	}
+
+	// Use type switch for known types
+	switch v := data.(type) {
+	case StatsStruct:
+		return &StatsData{
+			Requests:     v.Requests,
+			Errors:       v.Errors,
+			InputTokens:  v.InputTokens,
+			OutputTokens: v.OutputTokens,
+		}
+	case *StatsStruct:
+		if v != nil {
+			return &StatsData{
+				Requests:     v.Requests,
+				Errors:       v.Errors,
+				InputTokens:  v.InputTokens,
+				OutputTokens: v.OutputTokens,
+			}
+		}
+	}
+
+	// Last resort: use reflection with error handling
+	return extractStatsDataUsingReflection(data)
+}
+
+// extractStatsDataUsingReflection is a fallback that uses reflection safely
+func extractStatsDataUsingReflection(data interface{}) *StatsData {
+	v := reflect.ValueOf(data)
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return nil
+		}
+		v = v.Elem()
+	}
+
+	if v.Kind() != reflect.Struct {
+		return nil
+	}
+
+	// Safely extract fields
+	getIntField := func(name string) int {
+		field := v.FieldByName(name)
+		if !field.IsValid() {
+			return 0
+		}
+		if field.Kind() == reflect.Int || field.Kind() == reflect.Int64 {
+			return int(field.Int())
+		}
+		return 0
+	}
+
+	getInt64Field := func(name string) int64 {
+		field := v.FieldByName(name)
+		if !field.IsValid() {
+			return 0
+		}
+		if field.Kind() == reflect.Int || field.Kind() == reflect.Int64 {
+			return field.Int()
+		}
+		return 0
+	}
+
+	return &StatsData{
+		Requests:     getIntField("Requests"),
+		Errors:       getIntField("Errors"),
+		InputTokens:  getInt64Field("InputTokens"),
+		OutputTokens: getInt64Field("OutputTokens"),
+	}
 }
 
 // Reset resets all statistics
@@ -221,47 +321,26 @@ func (s *Stats) Load() error {
 
 // GetPeriodStats returns aggregated statistics for a time period
 func (s *Stats) GetPeriodStats(startDate, endDate string) map[string]*DailyStats {
-	// Get all endpoints from storage
-	totalRequests, statsData, err := s.storage.GetTotalStats()
+	// Use single aggregated query instead of N+1 queries
+	endpointStats, err := s.storage.GetPeriodStatsAggregated(startDate, endDate)
 	if err != nil {
-		logger.Error("Failed to get stats: %v", err)
+		logger.Error("Failed to get period stats: %v", err)
 		return make(map[string]*DailyStats)
 	}
 
-	_ = totalRequests // unused
 	result := make(map[string]*DailyStats)
-
-	// For each endpoint, get daily stats in the period
-	for endpointName := range statsData {
-		dailyRecords, err := s.storage.GetDailyStats(endpointName, startDate, endDate)
-		if err != nil {
-			logger.Error("Failed to get daily stats for %s: %v", endpointName, err)
-			continue
-		}
-
-		if len(dailyRecords) == 0 {
-			continue
-		}
-
-		// Aggregate the period
-		aggregated := &DailyStats{
-			Date: startDate + " to " + endDate,
-		}
-
-		for _, dailyInterface := range dailyRecords {
-			// Use reflection to extract fields
-			v := reflect.ValueOf(dailyInterface)
-			if v.Kind() == reflect.Ptr {
-				v = v.Elem()
+	for endpointName, statsInterface := range endpointStats {
+		// Use type assertion instead of reflection
+		stats := extractStatsData(statsInterface)
+		if stats != nil {
+			result[endpointName] = &DailyStats{
+				Date:         startDate + " to " + endDate,
+				Requests:     stats.Requests,
+				Errors:       stats.Errors,
+				InputTokens:  int(stats.InputTokens),
+				OutputTokens: int(stats.OutputTokens),
 			}
-
-			aggregated.Requests += int(v.FieldByName("Requests").Int())
-			aggregated.Errors += int(v.FieldByName("Errors").Int())
-			aggregated.InputTokens += int(v.FieldByName("InputTokens").Int())
-			aggregated.OutputTokens += int(v.FieldByName("OutputTokens").Int())
 		}
-
-		result[endpointName] = aggregated
 	}
 
 	return result
@@ -288,23 +367,98 @@ func (s *Stats) GetDailyStats(date string) map[string]*DailyStats {
 		}
 
 		if len(dailyRecords) > 0 {
-			// Use reflection to extract fields
-			v := reflect.ValueOf(dailyRecords[0])
-			if v.Kind() == reflect.Ptr {
-				v = v.Elem()
-			}
-
-			result[endpointName] = &DailyStats{
-				Date:         v.FieldByName("Date").String(),
-				Requests:     int(v.FieldByName("Requests").Int()),
-				Errors:       int(v.FieldByName("Errors").Int()),
-				InputTokens:  int(v.FieldByName("InputTokens").Int()),
-				OutputTokens: int(v.FieldByName("OutputTokens").Int()),
+			// Use type assertion for the first daily record
+			record := extractDailyRecord(dailyRecords[0])
+			if record != nil {
+				result[endpointName] = record
 			}
 		}
 	}
 
 	return result
+}
+
+// extractDailyRecord safely extracts a daily record using type assertion instead of reflection
+func extractDailyRecord(record interface{}) *DailyStats {
+	// Try direct type assertion
+	if daily, ok := record.(*DailyStats); ok {
+		return daily
+	}
+
+	// Try struct with matching fields
+	type DailyRecordLike struct {
+		Date         string
+		Requests     int
+		Errors       int
+		InputTokens  int
+		OutputTokens int
+	}
+
+	switch v := record.(type) {
+	case DailyRecordLike:
+		return &DailyStats{
+			Date:         v.Date,
+			Requests:     v.Requests,
+			Errors:       v.Errors,
+			InputTokens:  v.InputTokens,
+			OutputTokens: v.OutputTokens,
+		}
+	case *DailyRecordLike:
+		if v != nil {
+			return &DailyStats{
+				Date:         v.Date,
+				Requests:     v.Requests,
+				Errors:       v.Errors,
+				InputTokens:  v.InputTokens,
+				OutputTokens: v.OutputTokens,
+			}
+		}
+	}
+
+	// Fallback: use reflection safely
+	return extractDailyRecordUsingReflection(record)
+}
+
+// extractDailyRecordUsingReflection is a fallback that uses reflection safely
+func extractDailyRecordUsingReflection(record interface{}) *DailyStats {
+	v := reflect.ValueOf(record)
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return nil
+		}
+		v = v.Elem()
+	}
+
+	if v.Kind() != reflect.Struct {
+		return nil
+	}
+
+	getStringField := func(name string) string {
+		field := v.FieldByName(name)
+		if !field.IsValid() || field.Kind() != reflect.String {
+			return ""
+		}
+		return field.String()
+	}
+
+	getIntField := func(name string) int {
+		field := v.FieldByName(name)
+		if !field.IsValid() {
+			return 0
+		}
+		if field.Kind() == reflect.Int || field.Kind() == reflect.Int64 {
+			return int(field.Int())
+		}
+		return 0
+	}
+
+	return &DailyStats{
+		Date:         getStringField("Date"),
+		Requests:     getIntField("Requests"),
+		Errors:       getIntField("Errors"),
+		InputTokens:  getIntField("InputTokens"),
+		OutputTokens: getIntField("OutputTokens"),
+	}
 }
 
 // FlushSave forces an immediate save, canceling any pending debounced save

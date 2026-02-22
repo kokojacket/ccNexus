@@ -14,9 +14,6 @@ import (
 	"github.com/lich0821/ccNexus/internal/logger"
 	"github.com/lich0821/ccNexus/internal/tokencount"
 	"github.com/lich0821/ccNexus/internal/transformer"
-	"github.com/lich0821/ccNexus/internal/transformer/cc"
-	"github.com/lich0821/ccNexus/internal/transformer/cx/chat"
-	"github.com/lich0821/ccNexus/internal/transformer/cx/responses"
 )
 
 // handleStreamingResponse processes streaming SSE responses
@@ -221,37 +218,9 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 
 // transformStreamEvent transforms a single SSE event
 func (p *Proxy) transformStreamEvent(eventData []byte, trans transformer.Transformer, transformerName string, streamCtx *transformer.StreamContext) ([]byte, error) {
-	switch transformerName {
-	// Claude Code transformers
-	case "cc_claude":
-		return trans.(*cc.ClaudeTransformer).TransformResponseWithContext(eventData, true, streamCtx)
-	case "cc_openai":
-		return trans.(*cc.OpenAITransformer).TransformResponseWithContext(eventData, true, streamCtx)
-	case "cc_openai2":
-		return trans.(*cc.OpenAI2Transformer).TransformResponseWithContext(eventData, true, streamCtx)
-	case "cc_gemini":
-		return trans.(*cc.GeminiTransformer).TransformResponseWithContext(eventData, true, streamCtx)
-	// Codex Chat transformers
-	case "cx_chat_claude":
-		return trans.(*chat.ClaudeTransformer).TransformResponseWithContext(eventData, true, streamCtx)
-	case "cx_chat_openai":
-		return eventData, nil // passthrough
-	case "cx_chat_openai2":
-		return trans.(*chat.OpenAI2Transformer).TransformResponseWithContext(eventData, true, streamCtx)
-	case "cx_chat_gemini":
-		return trans.(*chat.GeminiTransformer).TransformResponseWithContext(eventData, true, streamCtx)
-	// Codex Responses transformers
-	case "cx_resp_claude":
-		return trans.(*responses.ClaudeTransformer).TransformResponseWithContext(eventData, true, streamCtx)
-	case "cx_resp_openai":
-		return trans.(*responses.OpenAITransformer).TransformResponseWithContext(eventData, true, streamCtx)
-	case "cx_resp_openai2":
-		return eventData, nil // passthrough
-	case "cx_resp_gemini":
-		return trans.(*responses.GeminiTransformer).TransformResponseWithContext(eventData, true, streamCtx)
-	default:
-		return trans.TransformResponse(eventData, true)
-	}
+	// Use the unified interface method instead of type assertion switch
+	// All transformers now implement TransformResponseWithContext
+	return trans.TransformResponseWithContext(eventData, true, streamCtx)
 }
 
 // extractTokensFromEvent extracts token counts from SSE event
