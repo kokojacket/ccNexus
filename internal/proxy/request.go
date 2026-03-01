@@ -202,24 +202,29 @@ func buildProxyRequest(r *http.Request, endpoint config.Endpoint, transformedBod
 }
 
 // sendRequest sends the HTTP request and returns the response
-func sendRequest(ctx context.Context, proxyReq *http.Request, cfg *config.Config) (*http.Response, error) {
+func sendRequest(ctx context.Context, proxyReq *http.Request, httpClient *http.Client, cfg *config.Config) (*http.Response, error) {
 	proxyReq = proxyReq.WithContext(ctx)
-	client := &http.Client{
-		Timeout: 300 * time.Second,
-	}
 
 	// Apply proxy if configured
 	if proxyCfg := cfg.GetProxy(); proxyCfg != nil && proxyCfg.URL != "" {
+		// Clone the client and replace transport for this request
+		clientWithProxy := &http.Client{
+			Timeout: httpClient.Timeout,
+		}
+
 		transport, err := CreateProxyTransport(proxyCfg.URL)
 		if err != nil {
 			logger.Warn("Failed to create proxy transport: %v, using direct connection", err)
+			clientWithProxy.Transport = httpClient.Transport
 		} else {
-			client.Transport = transport
+			clientWithProxy.Transport = transport
 			logger.Debug("Using proxy: %s", proxyCfg.URL)
 		}
+
+		return clientWithProxy.Do(proxyReq)
 	}
 
-	return client.Do(proxyReq)
+	return httpClient.Do(proxyReq)
 }
 
 // CreateProxyTransport creates an http.Transport with proxy support
@@ -229,7 +234,17 @@ func CreateProxyTransport(proxyURL string) (*http.Transport, error) {
 		return nil, fmt.Errorf("invalid proxy URL: %w", err)
 	}
 
-	transport := &http.Transport{}
+	transport := &http.Transport{
+		MaxIdleConns:           100,
+		MaxIdleConnsPerHost:    10,
+		IdleConnTimeout:        90 * time.Second,
+		TLSHandshakeTimeout:    10 * time.Second,
+		ExpectContinueTimeout:  1 * time.Second,
+		ResponseHeaderTimeout:  30 * time.Second,
+		WriteBufferSize:        128 * 1024, // 128KB write buffer for large SSE streams
+		ReadBufferSize:         128 * 1024, // 128KB read buffer for large SSE streams
+		MaxResponseHeaderBytes: 64 * 1024,  // 64KB max response headers
+	}
 
 	switch parsed.Scheme {
 	case "socks5", "socks5h":

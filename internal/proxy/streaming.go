@@ -5,16 +5,15 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
 	"github.com/lich0821/ccNexus/internal/config"
 	"github.com/lich0821/ccNexus/internal/logger"
+	"github.com/lich0821/ccNexus/internal/tokencount"
 	"github.com/lich0821/ccNexus/internal/transformer"
-	"github.com/lich0821/ccNexus/internal/transformer/cc"
-	"github.com/lich0821/ccNexus/internal/transformer/cx/chat"
-	"github.com/lich0821/ccNexus/internal/transformer/cx/responses"
 )
 
 // handleStreamingResponse processes streaming SSE responses
@@ -66,8 +65,9 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 	}
 
 	scanner := bufio.NewScanner(reader)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
+	// Increase buffer sizes to handle large SSE events (e.g., large file reads in tool calls)
+	buf := make([]byte, 0, 128*1024) // 128KB initial buffer (was 64KB)
+	scanner.Buffer(buf, 2*1024*1024) // 2MB max buffer (was 1MB)
 
 	var inputTokens, outputTokens int
 	var buffer bytes.Buffer
@@ -86,6 +86,24 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 
 		if strings.Contains(line, "data: [DONE]") {
 			streamDone = true
+
+			// Token Usage Fallback: Inject message_delta with estimated output_tokens before [DONE]
+			if outputTokens == 0 && outputText.Len() > 0 {
+				outputTokens = tokencount.EstimateOutputTokens(outputText.String())
+				logger.Debug("[%s] Token fallback before [DONE]: estimated output_tokens=%d", endpoint.Name, outputTokens)
+
+				// Update stream context for transformer fallback
+				if streamCtx != nil {
+					streamCtx.OutputTokens = outputTokens
+				}
+
+				// Inject message_delta event with usage
+				deltaEvent := fmt.Sprintf("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":%d}}\n\n", outputTokens)
+				if _, writeErr := w.Write([]byte(deltaEvent)); writeErr == nil {
+					flusher.Flush()
+				}
+			}
+
 			buffer.WriteString(line + "\n")
 			eventData := buffer.Bytes()
 			logger.DebugLog("[%s] SSE Event #%d (Original): %s", endpoint.Name, eventCount+1, string(eventData))
@@ -105,6 +123,24 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 			eventCount++
 			eventData := buffer.Bytes()
 			logger.DebugLog("[%s] SSE Event #%d (Original): %s", endpoint.Name, eventCount, string(eventData))
+
+			// Check if this is a message_stop event (Token Usage Fallback)
+			isMessageStop := p.isMessageStopEvent(eventData)
+			if isMessageStop && outputTokens == 0 && outputText.Len() > 0 {
+				outputTokens = tokencount.EstimateOutputTokens(outputText.String())
+				logger.Debug("[%s] Token fallback before message_stop: estimated output_tokens=%d", endpoint.Name, outputTokens)
+
+				// Update stream context for transformer fallback
+				if streamCtx != nil {
+					streamCtx.OutputTokens = outputTokens
+				}
+
+				// Inject message_delta event with usage before message_stop
+				deltaEvent := fmt.Sprintf("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":%d}}\n\n", outputTokens)
+				if _, writeErr := w.Write([]byte(deltaEvent)); writeErr == nil {
+					flusher.Flush()
+				}
+			}
 
 			transformedEvent, err := p.transformStreamEvent(eventData, trans, transformerName, streamCtx)
 			if err != nil {
@@ -132,46 +168,49 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 	}
 
 	if err := scanner.Err(); err != nil {
-		logger.Error("[%s] Scanner error: %v", endpoint.Name, err)
+		errMsg := err.Error()
+		// Check if it's an HTTP/2 stream error
+		if strings.Contains(errMsg, "stream error") || strings.Contains(errMsg, "INTERNAL_ERROR") {
+			requestSize := len(bodyBytes)
+			sizeStr := formatRequestSize(requestSize)
+			logger.Error("[%s] HTTP/2 stream error (Request size: %s / %d bytes): %v",
+				endpoint.Name, sizeStr, requestSize, err)
+
+			// Provide context based on request size
+			if requestSize > 100*1024 { // > 100KB
+				logger.Warn("[%s] Large request detected (%s). Consider: 1) Reading fewer files at once, 2) Using smaller code sections, 3) Breaking task into smaller requests",
+					endpoint.Name, sizeStr)
+			} else {
+				logger.Warn("[%s] This error may occur due to upstream server limitations or network issues.", endpoint.Name)
+			}
+		} else {
+			logger.Error("[%s] Scanner error: %v", endpoint.Name, err)
+		}
 	}
 
 	resp.Body.Close()
 	return inputTokens, outputTokens, outputText.String()
 }
 
+// formatRequestSize formats byte size into human-readable string
+func formatRequestSize(bytes int) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
 // transformStreamEvent transforms a single SSE event
 func (p *Proxy) transformStreamEvent(eventData []byte, trans transformer.Transformer, transformerName string, streamCtx *transformer.StreamContext) ([]byte, error) {
-	switch transformerName {
-	// Claude Code transformers
-	case "cc_claude":
-		return trans.(*cc.ClaudeTransformer).TransformResponseWithContext(eventData, true, streamCtx)
-	case "cc_openai":
-		return trans.(*cc.OpenAITransformer).TransformResponseWithContext(eventData, true, streamCtx)
-	case "cc_openai2":
-		return trans.(*cc.OpenAI2Transformer).TransformResponseWithContext(eventData, true, streamCtx)
-	case "cc_gemini":
-		return trans.(*cc.GeminiTransformer).TransformResponseWithContext(eventData, true, streamCtx)
-	// Codex Chat transformers
-	case "cx_chat_claude":
-		return trans.(*chat.ClaudeTransformer).TransformResponseWithContext(eventData, true, streamCtx)
-	case "cx_chat_openai":
-		return eventData, nil // passthrough
-	case "cx_chat_openai2":
-		return trans.(*chat.OpenAI2Transformer).TransformResponseWithContext(eventData, true, streamCtx)
-	case "cx_chat_gemini":
-		return trans.(*chat.GeminiTransformer).TransformResponseWithContext(eventData, true, streamCtx)
-	// Codex Responses transformers
-	case "cx_resp_claude":
-		return trans.(*responses.ClaudeTransformer).TransformResponseWithContext(eventData, true, streamCtx)
-	case "cx_resp_openai":
-		return trans.(*responses.OpenAITransformer).TransformResponseWithContext(eventData, true, streamCtx)
-	case "cx_resp_openai2":
-		return eventData, nil // passthrough
-	case "cx_resp_gemini":
-		return trans.(*responses.GeminiTransformer).TransformResponseWithContext(eventData, true, streamCtx)
-	default:
-		return trans.TransformResponse(eventData, true)
-	}
+	// Use the unified interface method instead of type assertion switch
+	// All transformers now implement TransformResponseWithContext
+	return trans.TransformResponseWithContext(eventData, true, streamCtx)
 }
 
 // extractTokensFromEvent extracts token counts from SSE event
@@ -209,6 +248,7 @@ func (p *Proxy) extractTokensFromEvent(eventData []byte, inputTokens, outputToke
 }
 
 // extractTextFromEvent extracts text content from transformed event
+// Enhanced to support both delta.text and content_block_delta formats
 func (p *Proxy) extractTextFromEvent(transformedEvent []byte, outputText *strings.Builder) {
 	scanner := bufio.NewScanner(bytes.NewReader(transformedEvent))
 	for scanner.Scan() {
@@ -223,12 +263,47 @@ func (p *Proxy) extractTextFromEvent(transformedEvent []byte, outputText *string
 			continue
 		}
 
+		eventType, _ := event["type"].(string)
+
+		// Handle content_block_delta format (from some third-party APIs)
+		if eventType == "content_block_delta" {
+			if delta, ok := event["delta"].(map[string]interface{}); ok {
+				if text, ok := delta["text"].(string); ok {
+					outputText.WriteString(text)
+				}
+			}
+		}
+
+		// Handle standard delta.text format
 		if delta, ok := event["delta"].(map[string]interface{}); ok {
 			if text, ok := delta["text"].(string); ok {
 				outputText.WriteString(text)
 			}
 		}
 	}
+}
+
+// isMessageStopEvent checks if the event is a message_stop event
+func (p *Proxy) isMessageStopEvent(eventData []byte) bool {
+	scanner := bufio.NewScanner(bytes.NewReader(eventData))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+
+		jsonData := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		var event map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonData), &event); err != nil {
+			continue
+		}
+
+		eventType, _ := event["type"].(string)
+		if eventType == "message_stop" {
+			return true
+		}
+	}
+	return false
 }
 
 // decompressGzip decompresses gzip-encoded response body
