@@ -2,22 +2,31 @@ import { api } from '../api.js';
 import { state } from '../state.js';
 import { notifications } from '../utils/notifications.js';
 import { getTransformerLabel, getStatusBadge } from '../utils/formatters.js';
+import { t } from '../utils/i18n.js';
 
 class Endpoints {
     constructor() {
         this.container = document.getElementById('view-container');
         this.endpoints = [];
+        this.tokenPools = {};
         this.currentEndpoint = null;
         this.draggedIndex = null;
+        this.currentTokenPoolEndpoint = null;
+        // 监听语言切换
+        window.addEventListener('languageChanged', () => {
+            if (state.get('currentView') === 'endpoints') {
+                this.render();
+            }
+        });
     }
 
     async render() {
         this.container.innerHTML = `
             <div class="endpoints">
                 <div class="flex-between mb-3">
-                    <h1>Endpoints</h1>
+                    <h1>${t('endpoints.title')}</h1>
                     <button class="btn btn-primary" id="add-endpoint-btn">
-                        <span>+ Add Endpoint</span>
+                        <span>+ ${t('endpoints.addEndpoint')}</span>
                     </button>
                 </div>
 
@@ -38,6 +47,7 @@ class Endpoints {
         try {
             const data = await api.getEndpoints();
             this.endpoints = data.endpoints || [];
+            this.tokenPools = data.tokenPools || {};
 
             // Get current endpoint
             try {
@@ -50,7 +60,7 @@ class Endpoints {
 
             this.renderTable();
         } catch (error) {
-            notifications.error('Failed to load endpoints: ' + error.message);
+            notifications.error(`${t('endpoints.failedToLoad')}: ${error.message}`);
         }
     }
 
@@ -61,8 +71,8 @@ class Endpoints {
             container.innerHTML = `
                 <div class="empty-state">
                     <div class="empty-state-icon">🔗</div>
-                    <div class="empty-state-title">No Endpoints</div>
-                    <div class="empty-state-message">Add your first endpoint to get started</div>
+                    <div class="empty-state-title">${t('endpoints.noEndpoints')}</div>
+                    <div class="empty-state-message">${t('endpoints.noEndpointsMessage')}</div>
                 </div>
             `;
             return;
@@ -74,12 +84,13 @@ class Endpoints {
                     <thead>
                         <tr>
                             <th style="width: 30px;"></th>
-                            <th>Name</th>
-                            <th>API URL</th>
-                            <th>Transformer</th>
-                            <th>Model</th>
-                            <th>Status</th>
-                            <th>Actions</th>
+                            <th>${t('common.name')}</th>
+                            <th>${t('endpoints.apiUrl')}</th>
+                            <th>${t('endpoints.transformer')}</th>
+                            <th>${t('endpoints.model')}</th>
+                            <th>${t('endpoints.tokenPool')}</th>
+                            <th>${t('common.status')}</th>
+                            <th>${t('common.actions')}</th>
                         </tr>
                     </thead>
                     <tbody id="endpoints-tbody">
@@ -98,14 +109,14 @@ class Endpoints {
         const isCurrentEndpoint = ep.name === this.currentEndpoint;
         const testStatus = this.getTestStatus(ep.name);
         let testStatusIcon = '⚠️';
-        let testStatusTitle = 'Not tested';
+        let testStatusTitle = t('endpoints.notTested');
 
         if (testStatus === true) {
             testStatusIcon = '✅';
-            testStatusTitle = 'Test passed';
+            testStatusTitle = t('endpoints.testPassed');
         } else if (testStatus === false) {
             testStatusIcon = '❌';
-            testStatusTitle = 'Test failed';
+            testStatusTitle = t('endpoints.testFailed');
         }
 
         return `
@@ -114,40 +125,61 @@ class Endpoints {
                 <td>
                     <strong>${this.escapeHtml(ep.name)}</strong>
                     <span title="${testStatusTitle}" style="margin-left: 5px;">${testStatusIcon}</span>
-                    ${isCurrentEndpoint ? '<span class="badge badge-primary" style="margin-left: 5px;">Current</span>' : ''}
+                    ${isCurrentEndpoint ? `<span class="badge badge-primary" style="margin-left: 5px;">${t('endpoints.current')}</span>` : ''}
                 </td>
                 <td>
                     <code style="font-size: 12px;">${this.escapeHtml(ep.apiUrl)}</code>
-                    <button class="btn-icon copy-btn" data-copy="${this.escapeHtml(ep.apiUrl)}" title="Copy URL">
+                    <button class="btn-icon copy-btn" data-copy="${this.escapeHtml(ep.apiUrl)}" title="${t('endpoints.copyUrl')}">
                         📋
                     </button>
                 </td>
                 <td>${getTransformerLabel(ep.transformer)}</td>
                 <td>${this.escapeHtml(ep.model || '-')}</td>
+                <td>${this.renderTokenPoolSummary(this.tokenPools[ep.name])}</td>
                 <td>${getStatusBadge(ep.enabled)}</td>
                 <td>
                     <div class="flex gap-2">
                         ${ep.enabled && !isCurrentEndpoint ? `
-                            <button class="btn btn-sm btn-secondary switch-btn" data-name="${this.escapeHtml(ep.name)}" title="Switch to this endpoint">
-                                Switch
+                            <button class="btn btn-sm btn-secondary switch-btn" data-name="${this.escapeHtml(ep.name)}" title="${t('endpoints.switchToEndpoint')}">
+                                ${t('common.switch')}
                             </button>
                         ` : ''}
                         <button class="btn btn-sm btn-secondary test-btn" data-name="${this.escapeHtml(ep.name)}">
-                            Test
+                            ${t('common.test')}
+                        </button>
+                        <button class="btn btn-sm btn-secondary token-pool-btn" data-name="${this.escapeHtml(ep.name)}">
+                            ${t('endpoints.tokenPoolManagement')}
                         </button>
                         <label class="toggle-switch">
                             <input type="checkbox" class="toggle-endpoint" data-name="${this.escapeHtml(ep.name)}" ${ep.enabled ? 'checked' : ''}>
                             <span class="toggle-slider"></span>
                         </label>
                         <button class="btn btn-sm btn-secondary edit-btn" data-name="${this.escapeHtml(ep.name)}">
-                            Edit
+                            ${t('common.edit')}
+                        </button>
+                        <button class="btn btn-sm btn-secondary clone-btn" data-name="${this.escapeHtml(ep.name)}">
+                            ${t('common.clone')}
                         </button>
                         <button class="btn btn-sm btn-danger delete-btn" data-name="${this.escapeHtml(ep.name)}">
-                            Delete
+                            ${t('common.delete')}
                         </button>
                     </div>
                 </td>
             </tr>
+        `;
+    }
+
+    renderTokenPoolSummary(pool) {
+        if (!pool || !pool.total) {
+            return '<span class="text-muted">0</span>';
+        }
+
+        return `
+            <div style="font-size: 12px; line-height: 1.4;">
+                <div>${t('endpoints.total')}: <strong>${pool.total}</strong></div>
+                <div>A:${pool.active || 0} E:${pool.expiring || 0} X:${pool.expired || 0} I:${pool.invalid || 0}</div>
+                <div>C:${pool.cooldown || 0} R:${pool.needRefresh || 0} D:${pool.disabled || 0}</div>
+            </div>
         `;
     }
 
@@ -167,6 +199,11 @@ class Endpoints {
             btn.addEventListener('click', () => this.showEditModal(btn.dataset.name));
         });
 
+        // Clone buttons
+        document.querySelectorAll('.clone-btn').forEach(btn => {
+            btn.addEventListener('click', () => this.cloneEndpoint(btn.dataset.name));
+        });
+
         // Delete buttons
         document.querySelectorAll('.delete-btn').forEach(btn => {
             btn.addEventListener('click', () => this.deleteEndpoint(btn.dataset.name));
@@ -175,6 +212,11 @@ class Endpoints {
         // Switch buttons
         document.querySelectorAll('.switch-btn').forEach(btn => {
             btn.addEventListener('click', () => this.switchEndpoint(btn.dataset.name));
+        });
+
+        // Token pool buttons
+        document.querySelectorAll('.token-pool-btn').forEach(btn => {
+            btn.addEventListener('click', () => this.showTokenPoolModal(btn.dataset.name));
         });
 
         // Copy buttons
@@ -228,10 +270,10 @@ class Endpoints {
             const names = this.endpoints.map(ep => ep.name);
             await api.reorderEndpoints(names);
 
-            notifications.success('Endpoints reordered successfully');
+            notifications.success(t('notifications.endpointsReordered'));
             await this.loadEndpoints();
         } catch (error) {
-            notifications.error('Failed to reorder endpoints: ' + error.message);
+            notifications.error(`${t('endpoints.failedToReorder')}: ${error.message}`);
             await this.loadEndpoints(); // Reload to reset order
         }
     }
@@ -239,10 +281,10 @@ class Endpoints {
     async switchEndpoint(name) {
         try {
             await api.switchEndpoint(name);
-            notifications.success(`Switched to endpoint: ${name}`);
+            notifications.success(`${t('notifications.endpointSwitched')} ${name}`);
             await this.loadEndpoints();
         } catch (error) {
-            notifications.error('Failed to switch endpoint: ' + error.message);
+            notifications.error(`${t('endpoints.failedToSwitch')}: ${error.message}`);
         }
     }
 
@@ -254,7 +296,7 @@ class Endpoints {
                 button.textContent = originalText;
             }, 1000);
         }).catch(err => {
-            notifications.error('Failed to copy to clipboard');
+            notifications.error(t('endpoints.failedToCopy'));
         });
     }
 
@@ -288,67 +330,77 @@ class Endpoints {
         }
     }
 
-    showEndpointModal(endpoint) {
-        const isEdit = !!endpoint;
+    showEndpointModal(endpoint, isClone = false) {
+        const isEdit = !!endpoint && !isClone;
         const modalContainer = document.getElementById('modal-container');
+
+        // For clone mode: show masked value like edit mode
+        const apiKeyValue = endpoint ? '****' : '';
+        const apiKeyPlaceholder = 'sk-...';
+        const apiKeyHint = isEdit || isClone ? `<small class="text-muted">${t('endpoints.keepExistingKey')}</small>` : '';
+        const cloneHiddenInput = isClone ? '<input type="hidden" name="isClone" value="true">' : '';
+        const cloneFromValue = endpoint?.cloneFrom || '';
+        const cloneFromInput = isClone && cloneFromValue ? `<input type="hidden" name="cloneFrom" value="${cloneFromValue}">` : '';
 
         modalContainer.innerHTML = `
             <div class="modal-overlay">
                 <div class="modal">
                     <div class="modal-header">
-                        <h3 class="modal-title">${isEdit ? 'Edit' : 'Add'} Endpoint</h3>
+                        <h3 class="modal-title">${isClone ? t('endpoints.cloneEndpoint') : (isEdit ? t('common.edit') : t('common.add'))} ${t('endpoints.title')}</h3>
                         <button class="modal-close" id="close-modal">×</button>
                     </div>
                     <div class="modal-body">
                         <form id="endpoint-form">
+                            ${cloneHiddenInput}
+                            ${cloneFromInput}
                             <div class="form-group">
-                                <label class="form-label">Name *</label>
+                                <label class="form-label">${t('common.name')} *</label>
                                 <input type="text" class="form-input" name="name" value="${endpoint ? this.escapeHtml(endpoint.name) : ''}" required ${isEdit ? 'readonly' : ''}>
                             </div>
                             <div class="form-group">
-                                <label class="form-label">API URL *</label>
-                                <input type="text" class="form-input" name="apiUrl" value="${endpoint ? this.escapeHtml(endpoint.apiUrl) : ''}" placeholder="https://api.example.com" required>
+                                <label class="form-label">${t('endpoints.apiUrl')} *</label>
+                                <input type="text" class="form-input" name="apiUrl" value="${endpoint ? this.escapeHtml(endpoint.apiUrl) : ''}" placeholder="${t('endpoints.apiUrlPlaceholder')}" required>
                             </div>
                             <div class="form-group">
-                                <label class="form-label">API Key *</label>
-                                <input type="password" class="form-input" name="apiKey" value="${endpoint ? '****' : ''}" placeholder="sk-..." required>
-                                ${endpoint ? '<small class="text-muted">Leave as **** to keep existing key</small>' : ''}
+                                <label class="form-label">${t('endpoints.apiKey')} *</label>
+                                <input type="password" class="form-input" name="apiKey" value="${apiKeyValue}" placeholder="${apiKeyPlaceholder}" required>
+                                ${apiKeyHint}
                             </div>
                             <div class="form-group">
-                                <label class="form-label">Transformer *</label>
+                                <label class="form-label">${t('endpoints.transformer')} *</label>
                                 <select class="form-select" name="transformer" required>
-                                    <option value="claude" ${endpoint?.transformer === 'claude' ? 'selected' : ''}>Claude</option>
-                                    <option value="openai" ${endpoint?.transformer === 'openai' ? 'selected' : ''}>OpenAI</option>
-                                    <option value="openai2" ${endpoint?.transformer === 'openai2' ? 'selected' : ''}>OpenAI Responses</option>
-                                    <option value="gemini" ${endpoint?.transformer === 'gemini' ? 'selected' : ''}>Gemini</option>
-                                    <option value="deepseek" ${endpoint?.transformer === 'deepseek' ? 'selected' : ''}>DeepSeek</option>
+                                    <option value="claude" ${endpoint?.transformer === 'claude' ? 'selected' : ''}>${t('transformers.claude')}</option>
+                                    <option value="openai" ${endpoint?.transformer === 'openai' ? 'selected' : ''}>${t('transformers.openai')}</option>
+                                    <option value="openai2" ${endpoint?.transformer === 'openai2' ? 'selected' : ''}>${t('transformers.openai2')}</option>
+                                    <option value="gemini" ${endpoint?.transformer === 'gemini' ? 'selected' : ''}>${t('transformers.gemini')}</option>
+                                    <option value="deepseek" ${endpoint?.transformer === 'deepseek' ? 'selected' : ''}>${t('transformers.deepseek')}</option>
                                 </select>
                             </div>
                             <div class="form-group">
-                                <label class="form-label">Model</label>
+                                <label class="form-label">${t('endpoints.model')}</label>
                                 <div style="display: flex; gap: 8px;">
-                                    <input type="text" class="form-input" name="model" id="model-input" value="${endpoint ? this.escapeHtml(endpoint.model || '') : ''}" placeholder="gpt-4, gemini-pro, etc." style="flex: 1;">
+                                    <input type="text" class="form-input" name="model" id="model-input" value="${endpoint ? this.escapeHtml(endpoint.model || '') : ''}" placeholder="${t('endpoints.modelPlaceholder')}" style="flex: 1;">
                                     <button type="button" class="btn btn-secondary" id="fetch-models-btn" style="white-space: nowrap;">
-                                        Fetch Models
+                                        ${t('endpoints.fetchModels')}
                                     </button>
                                 </div>
-                                <small class="text-muted">Click "Fetch Models" to load available models from the API</small>
+                                <small class="text-muted">${t('endpoints.fetchModelsHint')}</small>
                             </div>
                             <div class="form-group">
-                                <label class="form-label">Remark</label>
+                                <label class="form-label">${t('endpoints.remark')}</label>
                                 <textarea class="form-textarea" name="remark">${endpoint ? this.escapeHtml(endpoint.remark || '') : ''}</textarea>
                             </div>
                             <div class="form-group">
                                 <label>
                                     <input type="checkbox" class="form-checkbox" name="enabled" ${endpoint?.enabled !== false ? 'checked' : ''}>
-                                    Enabled
+                                    ${t('common.enabled')}
                                 </label>
                             </div>
                         </form>
                     </div>
                     <div class="modal-footer">
-                        <button class="btn btn-secondary" id="cancel-btn">Cancel</button>
-                        <button class="btn btn-primary" id="save-btn">${isEdit ? 'Update' : 'Create'}</button>
+                        <button class="btn btn-secondary" id="cancel-btn">${t('common.cancel')}</button>
+                        <button class="btn btn-primary" id="save-btn">${isEdit ? t('common.update') : t('common.create')}</button>
                     </div>
                 </div>
             </div>
@@ -356,7 +408,10 @@ class Endpoints {
 
         document.getElementById('close-modal').addEventListener('click', () => this.closeModal());
         document.getElementById('cancel-btn').addEventListener('click', () => this.closeModal());
-        document.getElementById('save-btn').addEventListener('click', () => this.saveEndpoint(isEdit, endpoint?.name));
+        document.getElementById('save-btn').addEventListener('click', () => {
+            const isClone = !!document.querySelector('input[name="isClone"]');
+            this.saveEndpoint(isEdit, endpoint?.name, isClone);
+        });
         document.getElementById('fetch-models-btn').addEventListener('click', () => this.fetchModels());
     }
 
@@ -372,7 +427,7 @@ class Endpoints {
         const transformer = transformerSelect.value;
 
         if (!apiUrl || !apiKey || apiKey === '****') {
-            notifications.error('Please enter API URL and API Key first');
+            notifications.error(t('endpoints.enterApiUrlAndKey'));
             return;
         }
 
@@ -386,10 +441,10 @@ class Endpoints {
                 // Show model selection modal
                 this.showModelSelectionModal(result.models, modelInput);
             } else {
-                notifications.info('No models found');
+                notifications.info(t('endpoints.noModelsFound'));
             }
         } catch (error) {
-            notifications.error('Failed to fetch models: ' + error.message);
+            notifications.error(`${t('endpoints.failedToFetchModels')}: ${error.message}`);
         } finally {
             fetchBtn.disabled = false;
             fetchBtn.textContent = 'Fetch Models';
@@ -407,7 +462,7 @@ class Endpoints {
         modelModal.innerHTML = `
             <div class="modal" style="max-width: 500px;">
                 <div class="modal-header">
-                    <h3 class="modal-title">Select Model</h3>
+                    <h3 class="modal-title">${t('endpoints.selectModel')}</h3>
                     <button class="modal-close" id="close-model-modal">×</button>
                 </div>
                 <div class="modal-body">
@@ -420,7 +475,7 @@ class Endpoints {
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button class="btn btn-secondary" id="cancel-model-btn">Cancel</button>
+                    <button class="btn btn-secondary" id="cancel-model-btn">${t('common.cancel')}</button>
                 </div>
             </div>
         `;
@@ -440,7 +495,7 @@ class Endpoints {
             item.addEventListener('click', () => {
                 const selectedModel = item.dataset.model;
                 modelInput.value = selectedModel;
-                notifications.success(`Model selected: ${selectedModel}`);
+                notifications.success(`${t('notifications.modelSelected')} ${selectedModel}`);
                 modelModal.remove();
             });
 
@@ -454,7 +509,7 @@ class Endpoints {
         });
     }
 
-    async saveEndpoint(isEdit, originalName) {
+    async saveEndpoint(isEdit, originalName, isClone = false) {
         const form = document.getElementById('endpoint-form');
         const formData = new FormData(form);
 
@@ -468,56 +523,62 @@ class Endpoints {
             enabled: formData.get('enabled') === 'on'
         };
 
-        // If editing and API key is ****, don't send it
-        if (isEdit && data.apiKey === '****') {
+        // If editing and API key is ****, don't send it (keep existing)
+        if ((isEdit || isClone) && data.apiKey === '****') {
             delete data.apiKey;
+        }
+
+        // For clone mode, add cloneFrom field if available
+        const cloneFromInput = document.querySelector('input[name="cloneFrom"]');
+        if (isClone && cloneFromInput && cloneFromInput.value) {
+            data.cloneFrom = cloneFromInput.value;
         }
 
         try {
             if (isEdit) {
                 await api.updateEndpoint(originalName, data);
-                notifications.success('Endpoint updated successfully');
+                notifications.success(t('notifications.endpointUpdated'));
             } else {
                 await api.createEndpoint(data);
-                notifications.success('Endpoint created successfully');
+                notifications.success(t('notifications.endpointCreated'));
             }
 
             this.closeModal();
             await this.loadEndpoints();
         } catch (error) {
-            notifications.error('Failed to save endpoint: ' + error.message);
+            notifications.error(`${t('endpoints.failedToSave')}: ${error.message}`);
         }
     }
 
     async toggleEndpoint(name, enabled) {
         try {
             await api.toggleEndpoint(name, enabled);
-            notifications.success(`Endpoint ${enabled ? 'enabled' : 'disabled'}`);
+            notifications.success(enabled ? t('notifications.endpointEnabled') : t('notifications.endpointDisabled'));
             await this.loadEndpoints();
         } catch (error) {
-            notifications.error('Failed to toggle endpoint: ' + error.message);
+            notifications.error(`${t('endpoints.failedToToggle')}: ${error.message}`);
             await this.loadEndpoints(); // Reload to reset toggle state
         }
     }
 
     async testEndpoint(name) {
         try {
-            notifications.info('Testing endpoint...');
+            notifications.info(t('endpoints.testing'));
             const result = await api.testEndpoint(name);
 
             if (result.success) {
                 this.saveTestStatus(name, true);
-                notifications.success(`Test successful! Latency: ${result.latency}ms`);
+                notifications.success(`${t('notifications.testSuccessful')} ${result.latency}ms`);
                 this.showTestResultModal(name, result);
                 await this.loadEndpoints(); // Refresh to show test status
             } else {
                 this.saveTestStatus(name, false);
-                notifications.error(`Test failed: ${result.error}`);
+                notifications.error(`${t('notifications.testFailed')} ${result.error}`);
                 await this.loadEndpoints(); // Refresh to show test status
             }
         } catch (error) {
             this.saveTestStatus(name, false);
-            notifications.error('Test failed: ' + error.message);
+            notifications.error(`${t('endpoints.failedToTest')}: ${error.message}`);
             await this.loadEndpoints(); // Refresh to show test status
         }
     }
@@ -529,23 +590,23 @@ class Endpoints {
             <div class="modal-overlay">
                 <div class="modal">
                     <div class="modal-header">
-                        <h3 class="modal-title">Test Result: ${this.escapeHtml(name)}</h3>
+                        <h3 class="modal-title">${t('endpoints.testResult')}: ${this.escapeHtml(name)}</h3>
                         <button class="modal-close" id="close-modal">×</button>
                     </div>
                     <div class="modal-body">
                         <div class="mb-2">
-                            <strong>Status:</strong> <span class="badge badge-success">Success</span>
+                            <strong>${t('common.status')}:</strong> <span class="badge badge-success">${t('common.success')}</span>
                         </div>
                         <div class="mb-2">
-                            <strong>Latency:</strong> ${result.latency}ms
+                            <strong>${t('endpoints.latency')}:</strong> ${result.latency}ms
                         </div>
                         <div class="mb-2">
-                            <strong>Response:</strong>
-                            <div class="code-block mt-1">${this.escapeHtml(result.response || 'No response')}</div>
+                            <strong>${t('endpoints.response')}:</strong>
+                            <div class="code-block mt-1">${this.escapeHtml(result.response || t('endpoints.noResponse'))}</div>
                         </div>
                     </div>
                     <div class="modal-footer">
-                        <button class="btn btn-primary" id="close-btn">Close</button>
+                        <button class="btn btn-primary" id="close-btn">${t('common.close')}</button>
                     </div>
                 </div>
             </div>
@@ -556,17 +617,296 @@ class Endpoints {
     }
 
     async deleteEndpoint(name) {
-        if (!confirm(`Are you sure you want to delete endpoint "${name}"?`)) {
+        if (!confirm(t('endpoints.confirmDelete').replace('{name}', name))) {
             return;
         }
 
         try {
             await api.deleteEndpoint(name);
-            notifications.success('Endpoint deleted successfully');
+            notifications.success(t('notifications.endpointDeleted'));
             await this.loadEndpoints();
         } catch (error) {
-            notifications.error('Failed to delete endpoint: ' + error.message);
+            notifications.error(`${t('endpoints.failedToDelete')}: ${error.message}`);
         }
+    }
+
+    async cloneEndpoint(name) {
+        const endpoint = this.endpoints.find(ep => ep.name === name);
+        if (!endpoint) {
+            notifications.error(t('endpoints.failedToClone'));
+            return;
+        }
+
+        // Extract base name and add (Copy) suffix
+        const baseName = name.replace(/\(Copy\)(?:\s+\d+)?$/, '').trim();
+        let newName = `${baseName} (Copy)`;
+        let counter = 1;
+        while (this.endpoints.some(ep => ep.name === newName)) {
+            newName = `${baseName} (Copy) ${counter}`;
+            counter++;
+        }
+
+        // Create cloned endpoint - don't include apiKey, use cloneFrom instead
+        const clonedEndpoint = {
+            name: newName,
+            apiUrl: endpoint.apiUrl,
+            transformer: endpoint.transformer,
+            model: endpoint.model,
+            remark: endpoint.remark,
+            enabled: endpoint.enabled,
+            cloneFrom: name  // Reference to source endpoint
+        };
+
+        try {
+            this.showEndpointModal(clonedEndpoint, true);
+            notifications.success(t('notifications.endpointCloned'));
+        } catch (error) {
+            notifications.error(`${t('endpoints.failedToClone')}: ${error.message}`);
+        }
+    }
+
+    async showTokenPoolModal(endpointName) {
+        this.currentTokenPoolEndpoint = endpointName;
+
+        try {
+            const result = await api.getEndpointCredentials(endpointName);
+            const credentials = result.credentials || [];
+            const stats = result.stats || {};
+            const modalContainer = document.getElementById('modal-container');
+
+            modalContainer.innerHTML = `
+                <div class="modal-overlay">
+                    <div class="modal" style="max-width: 960px; width: 95vw;">
+                        <div class="modal-header">
+                            <h3 class="modal-title">${t('endpoints.tokenPoolTitle')} ${this.escapeHtml(endpointName)}</h3>
+                            <button class="modal-close" id="close-modal">×</button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="mb-2" style="font-size: 13px;">
+                                <strong>${t('endpoints.total')}:</strong> ${stats.total || 0}
+                                <span style="margin-left: 12px;"><strong>${t('endpoints.active')}:</strong> ${stats.active || 0}</span>
+                                <span style="margin-left: 12px;"><strong>${t('endpoints.expiring')}:</strong> ${stats.expiring || 0}</span>
+                                <span style="margin-left: 12px;"><strong>${t('endpoints.needRefresh')}:</strong> ${stats.needRefresh || 0}</span>
+                                <span style="margin-left: 12px;"><strong>${t('endpoints.expired')}:</strong> ${stats.expired || 0}</span>
+                                <span style="margin-left: 12px;"><strong>${t('endpoints.invalid')}:</strong> ${stats.invalid || 0}</span>
+                            </div>
+
+                            <div class="form-group">
+                                <label class="form-label">${t('endpoints.batchImportJson')}</label>
+                                <textarea class="form-textarea" id="token-import-json" style="min-height: 140px;" placeholder='${t('endpoints.jsonPasteHint')}'></textarea>
+                                <label style="display: inline-flex; gap: 8px; align-items: center; margin-top: 8px;">
+                                    <input type="checkbox" id="token-import-overwrite">
+                                    ${t('endpoints.overwriteExisting')}
+                                </label>
+                                <div style="margin-top: 8px;">
+                                    <button class="btn btn-primary" id="token-import-btn">${t('common.import')}</button>
+                                </div>
+                            </div>
+
+                            <div class="table-container">
+                                <table class="table">
+                                    <thead>
+                                        <tr>
+                                            <th>${t('endpoints.id')}</th>
+                                            <th>${t('endpoints.account')}</th>
+                                            <th>${t('endpoints.email')}</th>
+                                            <th>${t('common.status')}</th>
+                                            <th>${t('endpoints.expiresAt')}</th>
+                                            <th>${t('endpoints.lastError')}</th>
+                                            <th>${t('common.actions')}</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${this.renderCredentialRows(credentials)}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button class="btn btn-secondary" id="refresh-token-pool-btn">${t('common.refresh')}</button>
+                            <button class="btn btn-secondary" id="close-token-pool-btn">${t('common.close')}</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            document.getElementById('close-modal').addEventListener('click', () => this.closeModal());
+            document.getElementById('close-token-pool-btn').addEventListener('click', () => this.closeModal());
+            document.getElementById('refresh-token-pool-btn').addEventListener('click', () => this.showTokenPoolModal(endpointName));
+            document.getElementById('token-import-btn').addEventListener('click', () => this.importEndpointCredentials(endpointName));
+
+            document.querySelectorAll('.token-enable-toggle').forEach(toggle => {
+                toggle.addEventListener('change', () => this.updateCredentialEnabled(endpointName, toggle.dataset.id, toggle.checked));
+            });
+            document.querySelectorAll('.token-update-btn').forEach(btn => {
+                btn.addEventListener('click', () => this.updateCredentialToken(endpointName, btn.dataset.id));
+            });
+            document.querySelectorAll('.token-activate-btn').forEach(btn => {
+                btn.addEventListener('click', () => this.activateCredential(endpointName, btn.dataset.id));
+            });
+            document.querySelectorAll('.token-delete-btn').forEach(btn => {
+                btn.addEventListener('click', () => this.deleteCredential(endpointName, btn.dataset.id));
+            });
+        } catch (error) {
+            notifications.error(`${t('endpoints.failedToLoadTokenPool')}: ${error.message}`);
+        }
+    }
+
+    renderCredentialRows(credentials) {
+        if (!credentials || credentials.length === 0) {
+            return `<tr><td colspan="7" class="text-center text-muted">${t('endpoints.noCredentials')}</td></tr>`;
+        }
+
+        return credentials.map(cred => `
+            <tr>
+                <td>${cred.id}</td>
+                <td><code>${this.escapeHtml(cred.accountId || '-')}</code></td>
+                <td>${this.escapeHtml(cred.email || '-')}</td>
+                <td>${this.renderCredentialStatusBadge(cred.status)}</td>
+                <td>${this.escapeHtml(this.formatDateTime(cred.expiresAt))}</td>
+                <td style="max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${this.escapeHtml(cred.lastError || '')}">
+                    ${this.escapeHtml(cred.lastError || '-')}
+                </td>
+                <td>
+                    <div class="flex gap-2">
+                        <label style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px;">
+                            <input type="checkbox" class="token-enable-toggle" data-id="${cred.id}" ${cred.enabled ? 'checked' : ''}>
+                            ${t('common.enabled')}
+                        </label>
+                        <button class="btn btn-sm btn-secondary token-update-btn" data-id="${cred.id}">${t('common.update')}</button>
+                        <button class="btn btn-sm btn-secondary token-activate-btn" data-id="${cred.id}">${t('endpoints.activate')}</button>
+                        <button class="btn btn-sm btn-danger token-delete-btn" data-id="${cred.id}">${t('common.delete')}</button>
+                    </div>
+                </td>
+            </tr>
+        `).join('');
+    }
+
+    renderCredentialStatusBadge(status) {
+        const normalized = status || 'unknown';
+        const colorMap = {
+            active: '#10b981',
+            expiring: '#f59e0b',
+            need_refresh: '#f97316',
+            expired: '#ef4444',
+            invalid: '#ef4444',
+            cooldown: '#6366f1',
+            disabled: '#6b7280'
+        };
+        const color = colorMap[normalized] || '#6b7280';
+        return `<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:${color};color:#fff;font-size:12px;">${this.escapeHtml(normalized)}</span>`;
+    }
+
+    async importEndpointCredentials(endpointName) {
+        const jsonInput = document.getElementById('token-import-json');
+        const overwriteInput = document.getElementById('token-import-overwrite');
+        const raw = (jsonInput?.value || '').trim();
+
+        if (!raw) {
+            notifications.warning(t('endpoints.pleasePasteJson'));
+            return;
+        }
+
+        let payload;
+        try {
+            payload = JSON.parse(raw);
+        } catch {
+            notifications.error(t('endpoints.invalidJson'));
+            return;
+        }
+
+        let requestBody;
+        if (Array.isArray(payload)) {
+            requestBody = { items: payload, overwrite: overwriteInput?.checked === true };
+        } else if (payload.items && Array.isArray(payload.items)) {
+            requestBody = { ...payload, overwrite: overwriteInput?.checked === true };
+        } else {
+            requestBody = { items: [payload], overwrite: overwriteInput?.checked === true };
+        }
+
+        try {
+            const result = await api.importEndpointCredentials(endpointName, requestBody);
+            notifications.success(t('notifications.importDone').replace('{created}', result.created || 0).replace('{updated}', result.updated || 0).replace('{skipped}', result.skipped || 0).replace('{failed}', result.failed || 0));
+            jsonInput.value = '';
+            await this.showTokenPoolModal(endpointName);
+            await this.loadEndpoints();
+        } catch (error) {
+            notifications.error(`${t('endpoints.failedToImport')}: ${error.message}`);
+        }
+    }
+
+    async updateCredentialEnabled(endpointName, credentialId, enabled) {
+        try {
+            await api.updateEndpointCredential(endpointName, credentialId, { enabled });
+            notifications.success(enabled ? t('notifications.credentialEnabled') : t('notifications.credentialDisabled'));
+            await this.showTokenPoolModal(endpointName);
+            await this.loadEndpoints();
+        } catch (error) {
+            notifications.error(`${t('endpoints.failedToUpdateCredential')}: ${error.message}`);
+            await this.showTokenPoolModal(endpointName);
+        }
+    }
+
+    async activateCredential(endpointName, credentialId) {
+        try {
+            await api.updateEndpointCredential(endpointName, credentialId, { status: 'active' });
+            notifications.success(t('notifications.credentialActivated'));
+            await this.showTokenPoolModal(endpointName);
+            await this.loadEndpoints();
+        } catch (error) {
+            notifications.error(`${t('endpoints.failedToActivateCredential')}: ${error.message}`);
+        }
+    }
+
+    async updateCredentialToken(endpointName, credentialId) {
+        const accessToken = prompt(t('endpoints.enterAccessToken'));
+        if (!accessToken) {
+            return;
+        }
+
+        const expiresAt = prompt(t('endpoints.enterExpiresAt'), '');
+        const payload = {
+            accessToken: accessToken.trim(),
+            status: 'active'
+        };
+        if (expiresAt && expiresAt.trim()) {
+            payload.expiresAt = expiresAt.trim();
+        }
+
+        try {
+            await api.updateEndpointCredential(endpointName, credentialId, payload);
+            notifications.success(t('notifications.tokenUpdated'));
+            await this.showTokenPoolModal(endpointName);
+            await this.loadEndpoints();
+        } catch (error) {
+            notifications.error(`${t('endpoints.failedToUpdateToken')}: ${error.message}`);
+        }
+    }
+
+    async deleteCredential(endpointName, credentialId) {
+        if (!confirm(t('endpoints.confirmDeleteCredential').replace('{id}', credentialId))) {
+            return;
+        }
+
+        try {
+            await api.deleteEndpointCredential(endpointName, credentialId);
+            notifications.success(t('notifications.credentialDeleted'));
+            await this.showTokenPoolModal(endpointName);
+            await this.loadEndpoints();
+        } catch (error) {
+            notifications.error(`${t('endpoints.failedToDeleteCredential')}: ${error.message}`);
+        }
+    }
+
+    formatDateTime(value) {
+        if (!value) {
+            return '-';
+        }
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+            return value;
+        }
+        return date.toLocaleString();
     }
 
     closeModal() {

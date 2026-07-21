@@ -6,7 +6,7 @@
 
 [![Build Status](https://github.com/lich0821/ccNexus/workflows/Build%20and%20Release/badge.svg)](https://github.com/lich0821/ccNexus/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go)](https://go.dev/)
 [![Wails](https://img.shields.io/badge/Wails-v2-blue)](https://wails.io/)
 
 [English](README_EN.md) | [简体中文](../README.md)
@@ -17,7 +17,10 @@
 
 - **Multi-Endpoint Rotation**: Automatic failover, switches to next endpoint on failure
 - **API Format Conversion**: Supports Claude, OpenAI, Gemini format conversion
-- **Real-time Statistics**: Request count, error count, token usage monitoring
+- **Codex Token Pool**: Bulk import `access_token/refresh_token` credentials with auto-rotation, auto-refresh, invalid-token isolation, and status management
+- **Token Pool Usage Insights**: Per-credential requests/errors/token counts with quick view
+- **Real-time Statistics**: Event-driven zero-latency stats updates with instant switching between 4 periods (daily/yesterday/weekly/monthly)
+- **Endpoint Filtering**: Multi-select filtering by type, availability, and status for quick endpoint location
 - **WebDAV Sync**: Sync configuration and data across devices
 - **Cross-Platform**: Windows, macOS, Linux
 
@@ -40,7 +43,12 @@
 
 ### 2. Add Endpoints
 
-Click "Add Endpoint", fill in API URL, key, and select transformer (claude/openai/gemini).
+Click "Add Endpoint", fill in API URL, key, and select transformer (claude/openai/gemini/openai2).
+
+For Codex Token Pool mode:
+- Set auth mode to `Codex Token Pool`
+- Import token JSON records in the Token Pool page (`access_token` + `refresh_token`)
+- ccNexus will handle token rotation, 401-triggered refresh, and lifecycle statuses (active/expiring/need_refresh/invalid, etc.)
 
 ### 3. Configure CC
 
@@ -74,6 +82,12 @@ wire_api = "responses"  # or "chat"
 ```
 
 `~/.codex/auth.json` can be ignored.
+
+## Runtime Notes
+
+- ccNexus listens on port `3000` by default. Override it with the `-port` CLI flag or `CCNEXUS_PORT`.
+- If Basic Auth is enabled and no password is stored, the app generates a random password on first launch and prints it to logs.
+- For headless deployments, prefer a trusted LAN or put ccNexus behind a reverse proxy with TLS and access control.
 
 ## Get Help
 

@@ -7,21 +7,31 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/net/proxy"
 
 	"github.com/lich0821/ccNexus/internal/config"
 	"github.com/lich0821/ccNexus/internal/logger"
+	"github.com/lich0821/ccNexus/internal/storage"
 	"github.com/lich0821/ccNexus/internal/transformer"
 	"github.com/lich0821/ccNexus/internal/transformer/cc"
 	"github.com/lich0821/ccNexus/internal/transformer/cx/chat"
 	"github.com/lich0821/ccNexus/internal/transformer/cx/responses"
 )
 
-// prepareTransformerForClient creates transformer based on client format and endpoint
-func prepareTransformerForClient(clientFormat ClientFormat, endpoint config.Endpoint) (transformer.Transformer, error) {
+const (
+	codexClientVersion = "0.101.0"
+	codexUserAgent     = "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+)
+
+// prepareTransformerForClient creates transformer based on client format and endpoint.
+// effectiveModel is the final model that should reach upstream after applying
+// endpoint-level overrides or falling back to the original request model.
+func prepareTransformerForClient(clientFormat ClientFormat, endpoint config.Endpoint, effectiveModel string) (transformer.Transformer, error) {
 	endpointTransformer := endpoint.Transformer
 	if endpointTransformer == "" {
 		endpointTransformer = "claude"
@@ -29,105 +39,70 @@ func prepareTransformerForClient(clientFormat ClientFormat, endpoint config.Endp
 
 	switch clientFormat {
 	case ClientFormatClaude:
-		return prepareCCTransformer(endpoint, endpointTransformer)
+		return prepareCCTransformer(endpoint, endpointTransformer, effectiveModel)
 	case ClientFormatOpenAIChat:
-		return prepareCxChatTransformer(endpoint, endpointTransformer)
+		return prepareCxChatTransformer(endpoint, endpointTransformer, effectiveModel)
 	case ClientFormatOpenAIResponses:
-		return prepareCxRespTransformer(endpoint, endpointTransformer)
+		return prepareCxRespTransformer(endpoint, endpointTransformer, effectiveModel)
 	}
 
 	return nil, fmt.Errorf("unsupported client format: %s", clientFormat)
 }
 
 // prepareCCTransformer creates transformer for Claude Code client
-func prepareCCTransformer(endpoint config.Endpoint, endpointTransformer string) (transformer.Transformer, error) {
+func prepareCCTransformer(endpoint config.Endpoint, endpointTransformer string, effectiveModel string) (transformer.Transformer, error) {
 	switch endpointTransformer {
 	case "claude":
-		if endpoint.Model != "" {
-			logger.Debug("[%s] Using cc_claude with model override: %s", endpoint.Name, endpoint.Model)
-			return cc.NewClaudeTransformerWithModel(endpoint.Model), nil
+		if effectiveModel != "" {
+			logger.Debug("[%s] Using cc_claude with model override: %s", endpoint.Name, effectiveModel)
+			return cc.NewClaudeTransformerWithModel(effectiveModel), nil
 		}
 		return cc.NewClaudeTransformer(), nil
 	case "openai":
-		if endpoint.Model == "" {
-			return nil, fmt.Errorf("OpenAI transformer requires model field")
-		}
-		return cc.NewOpenAITransformer(endpoint.Model), nil
+		return cc.NewOpenAITransformer(effectiveModel), nil
 	case "openai2":
-		if endpoint.Model == "" {
-			return nil, fmt.Errorf("OpenAI2 transformer requires model field")
-		}
-		return cc.NewOpenAI2Transformer(endpoint.Model), nil
+		return cc.NewOpenAI2Transformer(effectiveModel), nil
 	case "gemini":
-		if endpoint.Model == "" {
-			return nil, fmt.Errorf("Gemini transformer requires model field")
-		}
-		return cc.NewGeminiTransformer(endpoint.Model), nil
+		return cc.NewGeminiTransformer(effectiveModel), nil
 	default:
 		return nil, fmt.Errorf("unsupported endpoint transformer: %s", endpointTransformer)
 	}
 }
 
 // prepareCxChatTransformer creates transformer for Codex Chat API client
-func prepareCxChatTransformer(endpoint config.Endpoint, endpointTransformer string) (transformer.Transformer, error) {
+func prepareCxChatTransformer(endpoint config.Endpoint, endpointTransformer string, effectiveModel string) (transformer.Transformer, error) {
 	switch endpointTransformer {
 	case "claude":
-		model := endpoint.Model
-		if model == "" {
-			model = "claude-sonnet-4-20250514"
-		}
-		return chat.NewClaudeTransformer(model), nil
+		return chat.NewClaudeTransformer(effectiveModel), nil
 	case "openai":
-		if endpoint.Model == "" {
-			return nil, fmt.Errorf("OpenAI transformer requires model field")
-		}
-		return chat.NewOpenAITransformer(endpoint.Model), nil
+		return chat.NewOpenAITransformer(effectiveModel), nil
 	case "openai2":
-		if endpoint.Model == "" {
-			return nil, fmt.Errorf("OpenAI2 transformer requires model field")
-		}
-		return chat.NewOpenAI2Transformer(endpoint.Model), nil
+		return chat.NewOpenAI2Transformer(effectiveModel), nil
 	case "gemini":
-		if endpoint.Model == "" {
-			return nil, fmt.Errorf("Gemini transformer requires model field")
-		}
-		return chat.NewGeminiTransformer(endpoint.Model), nil
+		return chat.NewGeminiTransformer(effectiveModel), nil
 	default:
 		return nil, fmt.Errorf("unsupported endpoint transformer for Codex Chat: %s", endpointTransformer)
 	}
 }
 
 // prepareCxRespTransformer creates transformer for Codex Responses API client
-func prepareCxRespTransformer(endpoint config.Endpoint, endpointTransformer string) (transformer.Transformer, error) {
+func prepareCxRespTransformer(endpoint config.Endpoint, endpointTransformer string, effectiveModel string) (transformer.Transformer, error) {
 	switch endpointTransformer {
 	case "claude":
-		model := endpoint.Model
-		if model == "" {
-			model = "claude-sonnet-4-20250514"
-		}
-		return responses.NewClaudeTransformer(model), nil
+		return responses.NewClaudeTransformer(effectiveModel), nil
 	case "openai":
-		if endpoint.Model == "" {
-			return nil, fmt.Errorf("OpenAI transformer requires model field")
-		}
-		return responses.NewOpenAITransformer(endpoint.Model), nil
+		return responses.NewOpenAITransformer(effectiveModel), nil
 	case "openai2":
-		if endpoint.Model == "" {
-			return nil, fmt.Errorf("OpenAI2 transformer requires model field")
-		}
-		return responses.NewOpenAI2Transformer(endpoint.Model), nil
+		return responses.NewOpenAI2Transformer(effectiveModel), nil
 	case "gemini":
-		if endpoint.Model == "" {
-			return nil, fmt.Errorf("Gemini transformer requires model field")
-		}
-		return responses.NewGeminiTransformer(endpoint.Model), nil
+		return responses.NewGeminiTransformer(effectiveModel), nil
 	default:
 		return nil, fmt.Errorf("unsupported endpoint transformer for Codex Responses: %s", endpointTransformer)
 	}
 }
 
 // getTargetPath determines the target API path based on transformer name
-func getTargetPath(originalPath string, endpoint config.Endpoint, transformedBody []byte, transformerName string) string {
+func getTargetPath(originalPath string, endpoint config.Endpoint, transformedBody []byte, transformerName string, modelName string) string {
 	switch transformerName {
 	case "cc_claude", "cx_chat_claude", "cx_resp_claude":
 		return "/v1/messages"
@@ -140,28 +115,37 @@ func getTargetPath(originalPath string, endpoint config.Endpoint, transformedBod
 			Stream bool `json:"stream"`
 		}
 		json.Unmarshal(transformedBody, &geminiReq)
-		if geminiReq.Stream {
-			return fmt.Sprintf("/v1beta/models/%s:streamGenerateContent", endpoint.Model)
+		model := strings.TrimSpace(modelName)
+		if model == "" {
+			model = strings.TrimSpace(endpoint.Model)
 		}
-		return fmt.Sprintf("/v1beta/models/%s:generateContent", endpoint.Model)
+		if geminiReq.Stream {
+			return fmt.Sprintf("/v1beta/models/%s:streamGenerateContent", model)
+		}
+		return fmt.Sprintf("/v1beta/models/%s:generateContent", model)
 	}
 	return originalPath
 }
 
 // buildProxyRequest creates an HTTP request for the target API
-func buildProxyRequest(r *http.Request, endpoint config.Endpoint, transformedBody []byte, transformerName string) (*http.Request, error) {
-	targetPath := getTargetPath(r.URL.Path, endpoint, transformedBody, transformerName)
+func buildProxyRequest(r *http.Request, endpoint config.Endpoint, apiKey string, transformedBody []byte, transformerName string, modelName string, credential *storage.EndpointCredential) (*http.Request, error) {
+	targetPath := getTargetPath(r.URL.Path, endpoint, transformedBody, transformerName, modelName)
 	if targetPath == "" {
 		targetPath = r.URL.Path
 	}
 
 	normalizedAPIUrl := normalizeAPIUrl(endpoint.APIUrl)
+	targetPath = normalizeTargetPathForBaseURL(normalizedAPIUrl, targetPath)
+	requestBody := transformedBody
+	if isCodexBackendBaseURL(normalizedAPIUrl) && isResponsesPath(targetPath) {
+		requestBody = ensureCodexResponsesPayload(requestBody)
+	}
 	targetURL := fmt.Sprintf("%s%s", normalizedAPIUrl, targetPath)
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
 	}
 
-	proxyReq, err := http.NewRequest(r.Method, targetURL, bytes.NewReader(transformedBody))
+	proxyReq, err := http.NewRequest(r.Method, targetURL, bytes.NewReader(requestBody))
 	if err != nil {
 		return nil, err
 	}
@@ -182,49 +166,211 @@ func buildProxyRequest(r *http.Request, endpoint config.Endpoint, transformedBod
 	// Set authentication based on transformer type
 	switch transformerName {
 	case "cc_openai", "cc_openai2", "cx_chat_openai", "cx_chat_openai2", "cx_resp_openai", "cx_resp_openai2":
-		proxyReq.Header.Set("Authorization", "Bearer "+endpoint.APIKey)
+		proxyReq.Header.Set("Authorization", "Bearer "+apiKey)
 	case "cc_gemini", "cx_chat_gemini", "cx_resp_gemini":
 		q := proxyReq.URL.Query()
-		q.Set("key", endpoint.APIKey)
+		q.Set("key", apiKey)
 		q.Set("alt", "sse")
 		proxyReq.URL.RawQuery = q.Encode()
 	default:
 		// Claude endpoints
-		proxyReq.Header.Set("x-api-key", endpoint.APIKey)
-		proxyReq.Header.Set("Authorization", "Bearer "+endpoint.APIKey)
+		proxyReq.Header.Set("x-api-key", apiKey)
+		proxyReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
 	// Set Host header
-	hostOnly := strings.TrimPrefix(strings.TrimPrefix(normalizedAPIUrl, "https://"), "http://")
-	proxyReq.Header.Set("Host", hostOnly)
+	if parsedBase, err := url.Parse(normalizedAPIUrl); err == nil && strings.TrimSpace(parsedBase.Host) != "" {
+		proxyReq.Header.Set("Host", parsedBase.Host)
+	}
+	applyCodexCredentialHeaders(proxyReq, credential, requestBody)
 
 	return proxyReq, nil
+}
+
+func applyCodexCredentialHeaders(req *http.Request, credential *storage.EndpointCredential, payload []byte) {
+	if req == nil || credential == nil {
+		return
+	}
+	if !isCodexProviderType(credential.ProviderType) {
+		return
+	}
+	if !isResponsesPath(req.URL.Path) {
+		return
+	}
+
+	// Match Codex client headers for oauth credentials.
+	ensureHeader(req.Header, "Version", codexClientVersion)
+	ensureHeader(req.Header, "Session_id", uuid.NewString())
+	ensureHeader(req.Header, "User-Agent", codexUserAgent)
+
+	if isStreamingRequest(payload) {
+		req.Header.Set("Accept", "text/event-stream")
+	} else {
+		req.Header.Set("Accept", "application/json")
+	}
+	req.Header.Set("Connection", "Keep-Alive")
+	req.Header.Set("Originator", "codex_cli_rs")
+	if accountID := strings.TrimSpace(credential.AccountID); accountID != "" {
+		req.Header.Set("Chatgpt-Account-Id", accountID)
+	}
+}
+
+func ensureHeader(headers http.Header, key, value string) {
+	if headers == nil || strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+		return
+	}
+	if strings.TrimSpace(headers.Get(key)) == "" {
+		headers.Set(key, value)
+	}
+}
+
+func isResponsesPath(path string) bool {
+	trimmed := strings.TrimSpace(path)
+	return strings.HasSuffix(trimmed, "/responses") || strings.HasSuffix(trimmed, "/responses/compact")
+}
+
+func isStreamingRequest(payload []byte) bool {
+	var streamReq struct {
+		Stream bool `json:"stream"`
+	}
+	if err := json.Unmarshal(payload, &streamReq); err != nil {
+		return false
+	}
+	return streamReq.Stream
+}
+
+func isCodexProviderType(providerType string) bool {
+	p := strings.ToLower(strings.TrimSpace(providerType))
+	return p == "" || p == "codex"
+}
+
+// normalizeTargetPathForBaseURL adjusts OpenAI Responses paths for Codex backend base URLs.
+// This is endpoint URL compatibility handling and is independent from auth mode.
+func normalizeTargetPathForBaseURL(baseURL, targetPath string) string {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || parsed == nil {
+		return targetPath
+	}
+
+	cleanPath := path.Clean(strings.TrimSpace(parsed.Path))
+	isCodexBackend := strings.HasSuffix(cleanPath, "/backend-api/codex")
+	if !isCodexBackend {
+		return targetPath
+	}
+
+	switch strings.TrimSpace(targetPath) {
+	case "/v1/responses":
+		return "/responses"
+	case "/v1/responses/compact":
+		return "/responses/compact"
+	default:
+		return targetPath
+	}
+}
+
+func isCodexBackendBaseURL(baseURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || parsed == nil {
+		return false
+	}
+	cleanPath := path.Clean(strings.TrimSpace(parsed.Path))
+	return strings.HasSuffix(cleanPath, "/backend-api/codex")
+}
+
+func ensureCodexResponsesPayload(payload []byte) []byte {
+	trimmed := strings.TrimSpace(string(payload))
+	if trimmed == "" || strings.HasPrefix(trimmed, "[") {
+		return payload
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return payload
+	}
+	body["store"] = false
+	body["stream"] = true
+	if _, ok := body["instructions"]; !ok {
+		body["instructions"] = ""
+	}
+	updated, err := json.Marshal(body)
+	if err != nil {
+		return payload
+	}
+	return updated
+}
+
+func overrideModelInPayload(payload []byte, model string) []byte {
+	if strings.TrimSpace(model) == "" {
+		return payload
+	}
+	trimmed := strings.TrimSpace(string(payload))
+	if trimmed == "" || strings.HasPrefix(trimmed, "[") {
+		return payload
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return payload
+	}
+	body["model"] = model
+	updated, err := json.Marshal(body)
+	if err != nil {
+		return payload
+	}
+	return updated
 }
 
 // sendRequest sends the HTTP request and returns the response
 func sendRequest(ctx context.Context, proxyReq *http.Request, httpClient *http.Client, cfg *config.Config) (*http.Response, error) {
 	proxyReq = proxyReq.WithContext(ctx)
 
+	proxyURL := resolveProxyURLForRequest(cfg, proxyReq.URL)
 	// Apply proxy if configured
-	if proxyCfg := cfg.GetProxy(); proxyCfg != nil && proxyCfg.URL != "" {
+	if strings.TrimSpace(proxyURL) != "" {
 		// Clone the client and replace transport for this request
 		clientWithProxy := &http.Client{
 			Timeout: httpClient.Timeout,
 		}
 
-		transport, err := CreateProxyTransport(proxyCfg.URL)
+		transport, err := CreateProxyTransport(proxyURL)
 		if err != nil {
 			logger.Warn("Failed to create proxy transport: %v, using direct connection", err)
 			clientWithProxy.Transport = httpClient.Transport
 		} else {
 			clientWithProxy.Transport = transport
-			logger.Debug("Using proxy: %s", proxyCfg.URL)
 		}
 
 		return clientWithProxy.Do(proxyReq)
 	}
 
 	return httpClient.Do(proxyReq)
+}
+
+func resolveProxyURLForRequest(cfg *config.Config, targetURL *url.URL) string {
+	if cfg == nil {
+		return ""
+	}
+	if isCodexRequestURL(targetURL) {
+		if codexProxy := cfg.GetCodexProxy(); codexProxy != nil && strings.TrimSpace(codexProxy.URL) != "" {
+			return codexProxy.URL
+		}
+	}
+	if proxyCfg := cfg.GetProxy(); proxyCfg != nil && strings.TrimSpace(proxyCfg.URL) != "" {
+		return proxyCfg.URL
+	}
+	return ""
+}
+
+func isCodexRequestURL(targetURL *url.URL) bool {
+	if targetURL == nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(targetURL.Host))
+	if host != "chatgpt.com" {
+		return false
+	}
+	cleanPath := path.Clean(strings.TrimSpace(targetURL.Path))
+	return strings.Contains(cleanPath, "/backend-api/codex")
 }
 
 // CreateProxyTransport creates an http.Transport with proxy support
@@ -240,7 +386,7 @@ func CreateProxyTransport(proxyURL string) (*http.Transport, error) {
 		IdleConnTimeout:        90 * time.Second,
 		TLSHandshakeTimeout:    10 * time.Second,
 		ExpectContinueTimeout:  1 * time.Second,
-		ResponseHeaderTimeout:  30 * time.Second,
+		ResponseHeaderTimeout:  90 * time.Second,
 		WriteBufferSize:        128 * 1024, // 128KB write buffer for large SSE streams
 		ReadBufferSize:         128 * 1024, // 128KB read buffer for large SSE streams
 		MaxResponseHeaderBytes: 64 * 1024,  // 64KB max response headers

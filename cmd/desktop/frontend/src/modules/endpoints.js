@@ -1,7 +1,21 @@
 import { t } from '../i18n/index.js';
-import { formatTokens, maskApiKey } from '../utils/format.js';
+import { escapeHtml, formatTokens, maskApiKey } from '../utils/format.js';
 import { getEndpointStats } from './stats.js';
 import { toggleEndpoint, testAllEndpointsZeroCost } from './config.js';
+import { filterEndpoints, isFilterActive, updateFilterStats } from './filters.js';
+
+// 提取基础名称，移除副本后缀
+function extractBaseName(name) {
+    // 移除类似 "(Copy)", "(副本)", "(Copy) 1", "(副本) 1" 等后缀
+    // 使用固定的模式匹配，避免在函数内部调用 t()
+    const copyPattern = /\(Copy\)(?:\s+\d+)?$/;
+    const chineseCopyPattern = /\(副本\)(?:\s+\d+)?$/;
+    
+    let baseName = name.replace(copyPattern, '').trim();
+    baseName = baseName.replace(chineseCopyPattern, '').trim();
+    
+    return baseName;
+}
 
 const ENDPOINT_TEST_STATUS_KEY = 'ccNexus_endpointTestStatus';
 const ENDPOINT_VIEW_MODE_KEY = 'ccNexus_endpointViewMode';
@@ -80,6 +94,29 @@ let currentTestButton = null;
 let currentTestButtonOriginalText = '';
 let currentTestIndex = -1;
 let endpointPanelExpanded = true;
+let tokenPoolCurrentIndex = -1;
+let tokenPoolErrorCache = new Map();
+let tokenPoolUsageCache = new Map();
+
+function showNotification(message, type = 'info') {
+    const notification = document.createElement('div');
+    notification.className = `notification notification-${type}`;
+    notification.textContent = message;
+    document.body.appendChild(notification);
+    setTimeout(() => notification.classList.add('show'), 10);
+    setTimeout(() => {
+        notification.classList.remove('show');
+        setTimeout(() => notification.remove(), 300);
+    }, 3000);
+}
+
+function tp(key, values = {}) {
+    let text = t(`tokenPool.${key}`);
+    Object.entries(values).forEach(([name, value]) => {
+        text = text.replaceAll(`{${name}}`, String(value));
+    });
+    return text;
+}
 
 function copyToClipboard(text, button) {
     navigator.clipboard.writeText(text).then(() => {
@@ -131,10 +168,30 @@ export async function renderEndpoints(endpoints) {
         console.error('Failed to get current endpoint:', error);
     }
 
-    if (endpoints.length === 0) {
+    // 应用筛选
+    const filteredEndpoints = filterEndpoints(endpoints);
+    const isFiltered = isFilterActive();
+
+    // 更新筛选统计
+    updateFilterStats(endpoints.length, filteredEndpoints.length);
+
+    // 空状态处理
+    if (filteredEndpoints.length === 0) {
         container.innerHTML = `
-            <div class="empty-state">
-                <p>${t('endpoints.noEndpoints')}</p>
+            <div class="empty-state" style="text-align: center; padding: 60px 20px; color: #999;">
+                <div style="font-size: 48px; margin-bottom: 15px;">🔍</div>
+                <p style="font-size: 16px; margin-bottom: 20px;">
+                    ${isFiltered ? t('endpoints.noMatchingEndpoints') : t('endpoints.noEndpoints')}
+                </p>
+                ${isFiltered ? `
+                    <button class="btn btn-primary" onclick="window.clearAllFilters()">
+                        🔄 ${t('endpoints.clearFilters')}
+                    </button>
+                ` : `
+                    <button class="btn btn-primary" onclick="window.showAddEndpointModal()">
+                        ➕ ${t('header.addEndpoint')}
+                    </button>
+                `}
             </div>
         `;
         return;
@@ -144,17 +201,22 @@ export async function renderEndpoints(endpoints) {
 
     const endpointStats = getEndpointStats();
     // Display endpoints in config file order (no sorting by enabled status)
-    const sortedEndpoints = endpoints.map((ep, index) => {
+    // Keep original index from full endpoints array to avoid index mismatch after filtering
+    const endpointIndexMap = new Map(endpoints.map((ep, idx) => [ep, idx]));
+    const sortedEndpoints = filteredEndpoints.map((ep) => {
+        const originalIndex = endpointIndexMap.has(ep)
+            ? endpointIndexMap.get(ep)
+            : endpoints.findIndex(item => item.name === ep.name);
         const stats = endpointStats[ep.name] || { requests: 0, errors: 0, inputTokens: 0, outputTokens: 0 };
         const enabled = ep.enabled !== undefined ? ep.enabled : true;
-        return { endpoint: ep, originalIndex: index, stats, enabled };
+        return { endpoint: ep, originalIndex, stats, enabled };
     });
 
     // 检查视图模式
     const viewMode = getEndpointViewMode();
     if (viewMode === 'compact') {
         container.classList.add('compact-view');
-        renderCompactView(sortedEndpoints, container, currentEndpointName);
+        renderCompactView(sortedEndpoints, container, currentEndpointName, isFiltered);
         return;
     } else {
         container.classList.remove('compact-view');
@@ -165,13 +227,24 @@ export async function renderEndpoints(endpoints) {
         const enabled = ep.enabled !== undefined ? ep.enabled : true;
         const transformer = ep.transformer || 'claude';
         const model = ep.model || '';
+        const authMode = ep.authMode || 'api_key';
         const isCurrentEndpoint = ep.name === currentEndpointName;
 
         const item = document.createElement('div');
         item.className = 'endpoint-item';
-        item.draggable = true;
         item.dataset.name = ep.name;
         item.dataset.index = index;
+
+        // 筛选激活时禁用拖拽
+        if (isFiltered) {
+            item.draggable = false;
+            item.style.cursor = 'default';
+            item.title = t('endpoints.dragDisabledDuringFilter');
+        } else {
+            item.draggable = true;
+            setupDragAndDrop(item, container);
+        }
+
         // 获取测试状态：true=成功显示✅，false=失败显示❌，undefined/unknown=未测试/未知显示⚠️
         const testStatus = getEndpointTestStatus(ep.name);
         let testStatusIcon = '⚠️';
@@ -194,7 +267,9 @@ export async function renderEndpoints(endpoints) {
                     ${enabled && !isCurrentEndpoint ? '<button class="btn btn-switch" data-action="switch" data-name="' + ep.name + '">' + t('endpoints.switchTo') + '</button>' : ''}
                 </h3>
                 <p style="display: flex; align-items: center; gap: 8px; min-width: 0;"><span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">🌐 ${ep.apiUrl}</span> <button class="copy-btn" data-copy="${ep.apiUrl}" aria-label="${t('endpoints.copy')}" title="${t('endpoints.copy')}"><svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" width="1em" height="1em"><path d="M7 4c0-1.1.9-2 2-2h11a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-1V8c0-2-1-3-3-3H7V4Z" fill="currentColor"></path><path d="M5 7a2 2 0 0 0-2 2v10c0 1.1.9 2 2 2h10a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2H5Z" fill="currentColor"></path></svg></button></p>
-                <p style="display: flex; align-items: center; gap: 8px; min-width: 0;"><span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">🔑 ${maskApiKey(ep.apiKey)}</span> <button class="copy-btn" data-copy="${ep.apiKey}" aria-label="${t('endpoints.copy')}" title="${t('endpoints.copy')}"><svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" width="1em" height="1em"><path d="M7 4c0-1.1.9-2 2-2h11a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-1V8c0-2-1-3-3-3H7V4Z" fill="currentColor"></path><path d="M5 7a2 2 0 0 0-2 2v10c0 1.1.9 2 2 2h10a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2H5Z" fill="currentColor"></path></svg></button></p>
+                ${authMode === 'api_key'
+                    ? `<p style="display: flex; align-items: center; gap: 8px; min-width: 0;"><span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">🔑 ${maskApiKey(ep.apiKey)}</span> <button class="copy-btn" data-copy="${ep.apiKey}" aria-label="${t('endpoints.copy')}" title="${t('endpoints.copy')}"><svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" width="1em" height="1em"><path d="M7 4c0-1.1.9-2 2-2h11a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-1V8c0-2-1-3-3-3H7V4Z" fill="currentColor"></path><path d="M5 7a2 2 0 0 0-2 2v10c0 1.1.9 2 2 2h10a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2H5Z" fill="currentColor"></path></svg></button></p>`
+                    : `<p style="color: #666; font-size: 14px; margin-top: 3px;">🪪 ${tp('usingCredentialPool')}</p>`}
                 <p style="color: #666; font-size: 14px; margin-top: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">🔄 ${t('endpoints.transformer')}: ${transformer}${model ? ` (${model})` : ''}</p>
                 <p style="color: #666; font-size: 14px; margin-top: 3px;">📊 ${t('endpoints.requests')}: ${stats.requests} | ${t('endpoints.errors')}: ${stats.errors}</p>
                 <p style="color: #666; font-size: 14px; margin-top: 3px;">🎯 ${t('endpoints.tokens')}: ${formatTokens(totalTokens)} (${t('statistics.in')}: ${formatTokens(stats.inputTokens)}, ${t('statistics.out')}: ${formatTokens(stats.outputTokens)})</p>
@@ -206,6 +281,7 @@ export async function renderEndpoints(endpoints) {
                     <span class="toggle-slider"></span>
                 </label>
                 <button class="btn-card btn-secondary" data-action="test" data-index="${index}">${t('endpoints.test')}</button>
+                <button class="btn-card btn-secondary" data-action="copy" data-index="${index}">${t('endpoints.copy')}</button>
                 <button class="btn-card btn-secondary" data-action="edit" data-index="${index}">${t('endpoints.edit')}</button>
                 <button class="btn-card btn-danger" data-action="delete" data-index="${index}">${t('endpoints.delete')}</button>
             </div>
@@ -227,6 +303,11 @@ export async function renderEndpoints(endpoints) {
             const idx = parseInt(testBtn.getAttribute('data-index'));
             window.testEndpoint(idx, testBtn);
         });
+        const copyBtn = item.querySelector('[data-action="copy"]');
+        copyBtn.addEventListener('click', () => {
+            const idx = parseInt(copyBtn.getAttribute('data-index'));
+            copyEndpointConfig(idx, copyBtn);
+        });
         editBtn.addEventListener('click', () => {
             const idx = parseInt(editBtn.getAttribute('data-index'));
             window.editEndpoint(idx);
@@ -243,7 +324,7 @@ export async function renderEndpoints(endpoints) {
                 window.loadConfig();
             } catch (error) {
                 console.error('Failed to toggle endpoint:', error);
-                alert('Failed to toggle endpoint: ' + error);
+                alert(t('endpoints.toggleFailed') + ': ' + error);
                 e.target.checked = !newEnabled;
             }
         });
@@ -280,6 +361,1043 @@ export async function renderEndpoints(endpoints) {
 
         container.appendChild(item);
     });
+}
+
+function ensureTokenPoolModal() {
+    let modal = document.getElementById('tokenPoolModal');
+    if (modal) {
+        return modal;
+    }
+
+    modal = document.createElement('div');
+    modal.id = 'tokenPoolModal';
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width: min(1100px, 96vw); width: 96vw; height: min(82vh, 760px);">
+            <div class="modal-header">
+                <h2 id="tokenPoolTitle">🪪 ${tp('title')}</h2>
+            </div>
+            <div class="modal-body" style="padding: 6px 20px 16px 20px;">
+                <div id="tokenPoolHint" style="font-size: 12px; color: #6b7280; margin-bottom: 8px; display: none;"></div>
+                <div id="tokenPoolStats" style="display: block; margin-bottom: 12px;"></div>
+                <div class="token-pool-proxy-bar">
+                    <label for="tokenPoolProxyUrl" class="token-pool-proxy-label" style="font-size: 13px; font-weight: 600;" title="${tp('codexProxyTip')}">${tp('codexProxy')}</label>
+                    <input id="tokenPoolProxyUrl" class="form-input" type="text" placeholder="${t('settings.proxyUrlPlaceholder')}">
+                    <button class="btn btn-secondary" id="tokenPoolProxySaveBtn">${tp('save')}</button>
+                    <button class="btn btn-secondary" id="tokenPoolProxyClearBtn">${tp('clear')}</button>
+                </div>
+
+                <div class="form-group">
+                    <div class="token-pool-import-header">
+                        <label>${tp('batchImportJson')}</label>
+                        <div class="token-pool-overwrite">
+                            <label class="toggle-switch" style="margin: 0;">
+                                <input type="checkbox" id="tokenPoolOverwrite">
+                                <span class="toggle-slider"></span>
+                            </label>
+                            <label for="tokenPoolOverwrite" class="token-pool-overwrite-label">${tp('overwriteExisting')}</label>
+                        </div>
+                    </div>
+                    <textarea id="tokenPoolImportInput" style="width: 100%; min-height: 140px; padding: 10px; border: 1px solid #d1d5db; border-radius: 8px;" placeholder='${tp('pasteJsonPlaceholder')}'></textarea>
+                    <div style="margin-top: 8px;">
+                        <button class="btn btn-primary" id="tokenPoolImportBtn">${tp('import')}</button>
+                        <button class="btn btn-secondary" id="tokenPoolImportFilesBtn">${tp('importFiles')}</button>
+                        <button class="btn btn-secondary" id="tokenPoolRefreshBtn">${tp('refresh')}</button>
+                        <button class="btn btn-secondary" id="tokenPoolRateRefreshBtn">${tp('refreshLimits')}</button>
+                    </div>
+                </div>
+
+                <div style="overflow-x: auto;">
+                    <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                        <thead>
+                            <tr style="background: rgba(148, 163, 184, 0.15);">
+                                <th style="padding: 8px; text-align: center;">${tp('account')}</th>
+                                <th style="padding: 8px; text-align: center;">${tp('email')}</th>
+                                <th style="padding: 8px; text-align: center;">${tp('status')}</th>
+                                <th style="padding: 8px; text-align: center;">${tp('expiresAt')}</th>
+                                <th style="padding: 8px; text-align: center; width: 220px; max-width: 220px;">${tp('rateLimits')}</th>
+                                <th style="padding: 8px; text-align: center;">${tp('lastError')}</th>
+                                <th style="padding: 8px; text-align: center;">${tp('actions')}</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tokenPoolTableBody"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="tokenPoolCloseBtn">${tp('close')}</button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    const closeModal = () => {
+        modal.classList.remove('active');
+    };
+
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+            closeModal();
+        }
+    });
+    modal.querySelector('.modal-body')?.addEventListener('click', () => {
+        closeAllTokenPoolActionMenus(modal);
+    });
+    modal.querySelector('#tokenPoolCloseBtn').addEventListener('click', closeModal);
+    modal.querySelector('#tokenPoolImportBtn').addEventListener('click', handleTokenPoolImport);
+    modal.querySelector('#tokenPoolImportFilesBtn').addEventListener('click', handleTokenPoolFileImport);
+    modal.querySelector('#tokenPoolRefreshBtn').addEventListener('click', async () => {
+        await loadTokenPoolData(tokenPoolCurrentIndex);
+    });
+    modal.querySelector('#tokenPoolRateRefreshBtn').addEventListener('click', async () => {
+        await refreshTokenPoolRateLimits(tokenPoolCurrentIndex);
+    });
+    modal.querySelector('#tokenPoolProxySaveBtn').addEventListener('click', async () => {
+        await saveTokenPoolProxySetting();
+    });
+    modal.querySelector('#tokenPoolProxyClearBtn').addEventListener('click', async () => {
+        await saveTokenPoolProxySetting(true);
+    });
+
+    return modal;
+}
+
+async function loadTokenPoolProxySetting() {
+    const modal = ensureTokenPoolModal();
+    const input = modal.querySelector('#tokenPoolProxyUrl');
+    if (!input) {
+        return;
+    }
+
+    try {
+        const proxyUrl = await window.go.main.App.GetCodexProxyURL();
+        input.value = proxyUrl || '';
+    } catch (error) {
+        const message = error?.message || String(error);
+                showNotification(tp('proxyLoadFailed', { error: message }), 'error');
+    }
+}
+
+async function saveTokenPoolProxySetting(clear = false) {
+    const modal = ensureTokenPoolModal();
+    const input = modal.querySelector('#tokenPoolProxyUrl');
+    if (!input) {
+        return;
+    }
+
+    const proxyUrl = clear ? '' : input.value.trim();
+    try {
+        await window.go.main.App.SetCodexProxyURL(proxyUrl);
+        input.value = proxyUrl;
+        showNotification(proxyUrl ? tp('proxyUpdated') : tp('proxyCleared'), 'success');
+    } catch (error) {
+        const message = error?.message || String(error);
+        showNotification(tp('proxySaveFailed', { error: message }), 'error');
+    }
+}
+
+function parseAppJSON(value) {
+    if (typeof value === 'string') {
+        return JSON.parse(value);
+    }
+    return value;
+}
+
+function maskTokenPoolAccountID(accountId) {
+    const raw = (accountId || '').trim();
+    if (!raw) {
+        return '-';
+    }
+    return `${raw.slice(0, 8)}*`;
+}
+
+function maskTokenPoolEmail(email) {
+    const raw = (email || '').trim();
+    if (!raw || !raw.includes('@')) {
+        return raw || '-';
+    }
+    const [local, domain] = raw.split('@');
+    if (!local || !domain) {
+        return raw;
+    }
+    const localMasked = local.length <= 2
+        ? `${local[0] || ''}*`
+        : `${local[0]}*${local.slice(-2)}`;
+    const domainParts = domain.split('.');
+    const tld = domainParts.length > 1 ? domainParts[domainParts.length - 1] : '';
+    const firstLabel = domainParts[0] || '';
+    const domainMasked = firstLabel
+        ? `${firstLabel[0]}*${tld ? tld : ''}`
+        : `*${tld ? tld : ''}`;
+    return `${localMasked}@${domainMasked}`;
+}
+
+function ensureTokenPoolErrorModal() {
+    let modal = document.getElementById('tokenPoolErrorModal');
+    if (modal) {
+        return modal;
+    }
+
+    modal = document.createElement('div');
+    modal.id = 'tokenPoolErrorModal';
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content token-pool-error-modal-content">
+            <div class="modal-header">
+                <h2>🧾 ${tp('lastErrorTitle')}</h2>
+            </div>
+            <div class="modal-body">
+                <pre id="tokenPoolErrorText" class="token-pool-error-pre"></pre>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="tokenPoolErrorCloseBtn">${tp('close')}</button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+    const closeModal = () => modal.classList.remove('active');
+    modal.addEventListener('click', (event) => {
+        if (event.target === modal) {
+            closeModal();
+        }
+    });
+    modal.querySelector('#tokenPoolErrorCloseBtn')?.addEventListener('click', closeModal);
+    return modal;
+}
+
+function showTokenPoolErrorDialog(errorText) {
+    const modal = ensureTokenPoolErrorModal();
+    const textEl = modal.querySelector('#tokenPoolErrorText');
+    if (textEl) {
+        textEl.textContent = (errorText || '').trim() || '-';
+    }
+    modal.classList.add('active');
+}
+
+function ensureTokenPoolUsageModal() {
+    let modal = document.getElementById('tokenPoolUsageModal');
+    if (modal) {
+        return modal;
+    }
+
+    modal = document.createElement('div');
+    modal.id = 'tokenPoolUsageModal';
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content token-pool-usage-modal-content">
+            <div class="modal-header">
+                <h2 id="tokenPoolUsageTitle">📊 ${tp('usageTitle')}</h2>
+            </div>
+            <div class="modal-body">
+                <div id="tokenPoolUsageBody" class="token-pool-usage-body"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="tokenPoolUsageCloseBtn">${tp('close')}</button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+    const closeModal = () => modal.classList.remove('active');
+    modal.addEventListener('click', (event) => {
+        if (event.target === modal) {
+            closeModal();
+        }
+    });
+    modal.querySelector('#tokenPoolUsageCloseBtn')?.addEventListener('click', closeModal);
+    return modal;
+}
+
+function showTokenPoolUsageDialog(label, usage) {
+    const modal = ensureTokenPoolUsageModal();
+    const title = modal.querySelector('#tokenPoolUsageTitle');
+    const body = modal.querySelector('#tokenPoolUsageBody');
+    if (title) {
+        title.textContent = `📊 ${tp('usageTitle')}${label ? `: ${label}` : ''}`;
+    }
+
+    if (!usage) {
+        body.innerHTML = `<div class="token-pool-usage-empty">${tp('noUsageYet')}</div>`;
+    } else {
+        const totalTokens = (usage.inputTokens || 0) + (usage.outputTokens || 0);
+        const updatedAt = usage.updatedAt ? formatTokenPoolTime(usage.updatedAt) : '-';
+        body.innerHTML = `
+            <div class="token-pool-usage-grid">
+                <div>${tp('requests')}</div><div>${usage.requests || 0}</div>
+                <div>${tp('errors')}</div><div>${usage.errors || 0}</div>
+                <div>${tp('totalTokens')}</div><div>${formatTokens(totalTokens)}</div>
+                <div>${tp('inputTokens')}</div><div>${formatTokens(usage.inputTokens || 0)}</div>
+                <div>${tp('outputTokens')}</div><div>${formatTokens(usage.outputTokens || 0)}</div>
+                <div>${tp('updated')}</div><div>${escapeHtml(updatedAt)}</div>
+            </div>
+        `;
+    }
+
+    modal.classList.add('active');
+}
+
+function showTokenPoolUpdateTokenDialog() {
+    return new Promise((resolve) => {
+        const modal = document.createElement('div');
+        modal.id = 'tokenPoolUpdateTokenModal';
+        modal.className = 'modal active';
+        modal.style.zIndex = '1002';
+        modal.innerHTML = `
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>🔑 ${tp('updateToken')}</h2>
+                </div>
+                <div class="modal-body">
+                    <div class="prompt-dialog">
+                        <p><span class="required">*</span>${tp('accessToken')}</p>
+                        <div class="prompt-body">
+                            <textarea id="tokenPoolUpdateAccess" class="form-input" rows="4" placeholder="${tp('accessTokenPlaceholder')}"></textarea>
+                        </div>
+                        <p style="margin-top: 12px;">${tp('expiresAtOptional')}</p>
+                        <div class="prompt-body">
+                            <input type="text" id="tokenPoolUpdateExpires" class="form-input" placeholder="2026-03-18T09:22:23Z" />
+                        </div>
+                        <div class="prompt-actions">
+                            <button class="btn btn-primary" id="tokenPoolUpdateOk">${tp('ok')}</button>
+                            <button class="btn btn-secondary" id="tokenPoolUpdateCancel">${tp('cancel')}</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+
+        const accessEl = modal.querySelector('#tokenPoolUpdateAccess');
+        const expiresEl = modal.querySelector('#tokenPoolUpdateExpires');
+        setTimeout(() => accessEl?.focus(), 50);
+
+        const closeModal = (value) => {
+            modal.classList.remove('active');
+            setTimeout(() => modal.remove(), 200);
+            resolve(value);
+        };
+
+        const handleSubmit = () => {
+            const token = (accessEl?.value || '').trim();
+            if (!token) {
+                showNotification(tp('accessTokenRequired'), 'warning');
+                accessEl?.focus();
+                return;
+            }
+            const expiresAt = (expiresEl?.value || '').trim();
+            closeModal({ token, expiresAt });
+        };
+
+        modal.querySelector('#tokenPoolUpdateOk')?.addEventListener('click', handleSubmit);
+        modal.querySelector('#tokenPoolUpdateCancel')?.addEventListener('click', () => closeModal(null));
+        modal.addEventListener('click', (event) => {
+            if (event.target === modal) {
+                closeModal(null);
+            }
+        });
+
+        modal.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                closeModal(null);
+            }
+        });
+    });
+}
+
+function formatTokenPoolTime(value) {
+    if (!value) {
+        return '-';
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+        return value;
+    }
+    const pad = (num) => String(num).padStart(2, '0');
+    const year = date.getFullYear();
+    const month = pad(date.getMonth() + 1);
+    const day = pad(date.getDate());
+    const hours = pad(date.getHours());
+    const minutes = pad(date.getMinutes());
+    const seconds = pad(date.getSeconds());
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+}
+
+function renderTokenPoolStatus(status, enabled = true, rateLimits = null) {
+    if (!enabled) {
+        return `<span style="display: inline-block; padding: 2px 8px; border-radius: 999px; background: #6b7280; color: #fff; font-size: 12px;">${tp('statusDisabled')}</span>`;
+    }
+    const rateStatus = (rateLimits?.status || '').trim();
+    const normalized = rateStatus && rateStatus !== 'ok' ? rateStatus : (status || 'active');
+    const colors = {
+        active: '#10b981',
+        expiring: '#f59e0b',
+        need_refresh: '#f97316',
+        expired: '#ef4444',
+        invalid: '#ef4444',
+        unauthorized: '#ef4444',
+        blocked: '#ef4444',
+        error: '#ef4444',
+        network: '#f59e0b',
+        upstream: '#f59e0b',
+        parse_error: '#6366f1',
+        empty: '#6366f1',
+        missing_token: '#6b7280',
+        invalid: '#ef4444',
+        cooldown: '#6366f1'
+    };
+    const color = colors[normalized] || '#6b7280';
+    return `<span style="display: inline-block; padding: 2px 8px; border-radius: 999px; background: ${color}; color: #fff; font-size: 12px;">${escapeHtml(normalized)}</span>`;
+}
+
+function renderTokenPoolStats(stats = {}) {
+    const items = [
+        ['statsTotal', stats.total || 0],
+        ['statsActive', stats.active || 0],
+        ['statsExpiring', stats.expiring || 0],
+        ['statsNeedRefresh', stats.needRefresh || 0],
+        ['statsExpired', stats.expired || 0],
+        ['statsInvalid', stats.invalid || 0],
+        ['statsCooldown', stats.cooldown || 0],
+        ['statsDisabled', stats.disabled || 0]
+    ];
+
+    const parts = items.map(([key, value]) => {
+        const highlight = value > 0 && key !== 'statsTotal' && key !== 'statsActive' ? ' token-pool-stat-alert' : '';
+        return `<span class="token-pool-stat${highlight}"><strong>${tp(key)}</strong> ${value}</span>`;
+    });
+
+    return `<div class="token-pool-stats-line">${parts.join('<span class="token-pool-stat-sep">·</span>')}</div>`;
+}
+
+function renderTokenPoolRows(credentials = []) {
+    if (!credentials.length) {
+        return `<tr><td colspan="7" style="padding: 16px; text-align: center; color: #6b7280;">${tp('noCredentials')}</td></tr>`;
+    }
+
+    const latestUsed = credentials.reduce((max, cred) => {
+        if (!cred.lastUsedAt) {
+            return max;
+        }
+        const t = Date.parse(cred.lastUsedAt);
+        if (Number.isNaN(t)) {
+            return max;
+        }
+        return t > max ? t : max;
+    }, 0);
+
+    return credentials.map((cred) => `
+        <tr class="${latestUsed && cred.lastUsedAt && Date.parse(cred.lastUsedAt) === latestUsed ? 'token-pool-row-active' : ''}" style="border-top: 1px solid rgba(148, 163, 184, 0.2);">
+            <td style="padding: 8px;"><code title="${escapeHtml(cred.accountId || '')}">${escapeHtml(maskTokenPoolAccountID(cred.accountId))}</code></td>
+            <td style="padding: 8px;"><span title="${escapeHtml(cred.email || '')}">${escapeHtml(maskTokenPoolEmail(cred.email))}</span></td>
+            <td style="padding: 8px;">
+                <div class="token-pool-status-cell">
+                    ${renderTokenPoolStatus(cred.status, cred.enabled, cred.rateLimits)}
+                </div>
+            </td>
+            <td style="padding: 8px; white-space: nowrap;">${escapeHtml(formatTokenPoolTime(cred.expiresAt))}</td>
+            <td style="padding: 8px; width: 220px; max-width: 220px;">${renderTokenPoolRateLimits(cred.rateLimits)}</td>
+            <td style="padding: 8px;">
+                ${tokenPoolErrorCache.has(String(cred.id))
+                    ? `<button type="button" class="btn btn-secondary token-pool-error-view" data-error-id="${cred.id}" style="padding: 4px 8px; font-size: 12px;">${tp('view')}</button>`
+                    : '-'}
+            </td>
+            <td style="padding: 8px;">
+                <div class="token-pool-actions">
+                    <button type="button" class="btn btn-secondary token-pool-toggle-action" data-id="${cred.id}" data-enabled="${cred.enabled ? '1' : '0'}" style="padding: 4px 8px; font-size: 12px;">${cred.enabled ? tp('disable') : tp('enable')}</button>
+                    <div class="token-pool-more-wrap">
+                        <button type="button" class="btn btn-secondary token-pool-more-toggle" data-id="${cred.id}" style="padding: 4px 8px; font-size: 12px;">${tp('more')}</button>
+                        <div class="token-pool-more-menu">
+                            <button type="button" class="token-pool-activate" data-id="${cred.id}">${tp('activate')}</button>
+                            <button type="button" class="token-pool-rate-refresh" data-id="${cred.id}">${tp('refreshLimitsAction')}</button>
+                            <button type="button" class="token-pool-refresh-token" data-id="${cred.id}">${tp('refreshToken')}</button>
+                            <button type="button" class="token-pool-usage" data-id="${cred.id}">${tp('usage')}</button>
+                            <button type="button" class="token-pool-update" data-id="${cred.id}">${tp('updateToken')}</button>
+                            <button type="button" class="token-pool-delete" data-id="${cred.id}">${tp('delete')}</button>
+                        </div>
+                    </div>
+                </div>
+            </td>
+        </tr>
+    `).join('');
+}
+
+function formatTokenPoolWindowLabel(windowMinutes) {
+    if (!windowMinutes || windowMinutes <= 0) {
+        return '';
+    }
+    if (windowMinutes % (60 * 24) === 0) {
+        return `${windowMinutes / (60 * 24)}d`;
+    }
+    if (windowMinutes % 60 === 0) {
+        return `${windowMinutes / 60}h`;
+    }
+    return `${windowMinutes}m`;
+}
+
+function renderTokenPoolRateLimits(rateLimits) {
+    if (!rateLimits) {
+        return '-';
+    }
+    const status = (rateLimits.status || '').trim();
+    const updatedAt = rateLimits.updatedAt ? formatTokenPoolTime(rateLimits.updatedAt) : '-';
+    const data = rateLimits.data || {};
+    const snapshot = data.snapshot || {};
+    const primary = snapshot.primary || {};
+    const secondary = snapshot.secondary || {};
+    const usedPercent = typeof primary.usedPercent === 'number' ? Math.round(primary.usedPercent) : null;
+    const primaryWindowMinutes = primary.windowMinutes;
+    const secondaryUsedPercent = typeof secondary.usedPercent === 'number' ? Math.round(secondary.usedPercent) : null;
+    const secondaryWindowMinutes = secondary.windowMinutes;
+    const primaryLabel = formatTokenPoolWindowLabel(primaryWindowMinutes);
+    const secondaryLabel = formatTokenPoolWindowLabel(secondaryWindowMinutes);
+    const parts = [];
+    if (primaryLabel || usedPercent !== null) {
+        const pct = usedPercent !== null ? `${usedPercent}%` : '';
+        parts.push(`${pct}@${primaryLabel || tp('window')}`.replace(/^@/, '').trim());
+    }
+    if (secondaryLabel || secondaryUsedPercent !== null) {
+        const pct = secondaryUsedPercent !== null ? `${secondaryUsedPercent}%` : '';
+        parts.push(`${pct}@${secondaryLabel || tp('shortWindow')}`.replace(/^@/, '').trim());
+    }
+    const summary = parts.join(' · ');
+    const credits = snapshot.credits || {};
+    const creditText = credits.unlimited
+        ? tp('unlimited')
+        : credits.balance
+            ? tp('balance', { balance: credits.balance })
+            : credits.hasCredits
+                ? tp('hasCredits')
+                : '';
+    const primaryReset = primary.resetsAt ? formatTokenPoolTime(new Date(primary.resetsAt * 1000).toISOString()) : '';
+    const secondaryReset = secondary.resetsAt ? formatTokenPoolTime(new Date(secondary.resetsAt * 1000).toISOString()) : '';
+    const metaParts = [];
+    if (creditText) {
+        metaParts.push(creditText);
+    }
+    if (!summary && status === 'ok') {
+        metaParts.push(tp('ok'));
+    }
+
+    const detailLines = [];
+    if (summary) {
+        detailLines.push(summary);
+    }
+    if (primaryReset) {
+        detailLines.push(`${tp('reset')} ${primaryLabel || tp('primary')} ${primaryReset}`.trim());
+    }
+    if (secondaryReset) {
+        detailLines.push(`${tp('reset')} ${secondaryLabel || tp('secondary')} ${secondaryReset}`.trim());
+    }
+    if (creditText) {
+        detailLines.push(`${tp('credits')} ${creditText}`);
+    }
+    if (updatedAt) {
+        detailLines.push(`${tp('updated')} ${updatedAt}`);
+    }
+    const detailTitle = detailLines.join(' · ');
+
+    const errorText = (rateLimits.error || '').trim();
+    if (status && status !== 'ok') {
+        return '-';
+    }
+
+    if (!summary && !metaParts.length) {
+        return '-';
+    }
+
+    const mainLine = escapeHtml(summary || metaParts.shift() || '');
+    const metaLine = metaParts.length ? escapeHtml(metaParts.join(' · ')) : '';
+    return `
+        <div class="token-pool-rate-cell" title="${escapeHtml(detailTitle)}">
+            <div class="token-pool-rate-main">${mainLine}</div>
+            ${metaLine ? `<div class="token-pool-rate-meta">${metaLine}</div>` : ''}
+        </div>
+    `;
+}
+
+function closeAllTokenPoolActionMenus(scope = document) {
+    scope.querySelectorAll('.token-pool-more-menu.show').forEach((menu) => {
+        menu.classList.remove('show');
+    });
+}
+
+function setTokenPoolHint(modal, text) {
+    const hintEl = modal.querySelector('#tokenPoolHint');
+    if (!hintEl) {
+        return;
+    }
+    const message = (text || '').trim();
+    hintEl.textContent = message;
+    hintEl.style.display = message ? 'block' : 'none';
+}
+
+async function loadTokenPoolData(index) {
+    if (index < 0) {
+        return;
+    }
+
+    const modal = ensureTokenPoolModal();
+    setTokenPoolHint(modal, tp('loading'));
+    const raw = await window.go.main.App.GetEndpointCredentials(index);
+    const parsed = parseAppJSON(raw);
+    if (!parsed.success) {
+        setTokenPoolHint(modal, tp('loadFailed', { error: parsed.error || tp('unknownError') }));
+        throw new Error(parsed.error || tp('failed', { error: tp('unknownError') }));
+    }
+
+    const payload = parsed.data || {};
+    const credentials = payload.credentials || [];
+    const stats = payload.stats || {};
+
+    tokenPoolErrorCache = new Map();
+    tokenPoolUsageCache = new Map();
+    credentials.forEach((cred) => {
+        const primaryError = (cred.lastError || '').trim();
+        const rateErr = (cred.rateLimits && cred.rateLimits.status && cred.rateLimits.status !== 'ok')
+            ? (cred.rateLimits.error || '').trim()
+            : '';
+        const displayError = primaryError || rateErr;
+        if (displayError) {
+            tokenPoolErrorCache.set(String(cred.id), displayError);
+        }
+        if (cred.usage) {
+            tokenPoolUsageCache.set(String(cred.id), cred.usage);
+        }
+    });
+
+    const statsEl = modal.querySelector('#tokenPoolStats');
+    const bodyEl = modal.querySelector('#tokenPoolTableBody');
+    statsEl.innerHTML = renderTokenPoolStats(stats);
+    bodyEl.innerHTML = renderTokenPoolRows(credentials);
+    setTokenPoolHint(modal, '');
+
+    bodyEl.querySelectorAll('.token-pool-toggle-action').forEach((button) => {
+        button.addEventListener('click', async () => {
+            const credentialID = Number(button.dataset.id);
+            const currentlyEnabled = button.dataset.enabled === '1';
+            const targetEnabled = !currentlyEnabled;
+            try {
+                await window.go.main.App.SetEndpointCredentialEnabled(tokenPoolCurrentIndex, credentialID, targetEnabled);
+                showNotification(targetEnabled ? tp('enable') : tp('disable'), 'success');
+                await loadTokenPoolData(tokenPoolCurrentIndex);
+                if (window.loadConfig) {
+                    window.loadConfig();
+                }
+            } catch (error) {
+                const message = error?.message || String(error);
+                showNotification(tp('failed', { error: message }), 'error');
+                await loadTokenPoolData(tokenPoolCurrentIndex);
+            }
+            closeAllTokenPoolActionMenus(bodyEl);
+        });
+    });
+
+    bodyEl.querySelectorAll('.token-pool-activate').forEach((button) => {
+        button.addEventListener('click', async () => {
+            try {
+                await window.go.main.App.ActivateEndpointCredential(tokenPoolCurrentIndex, Number(button.dataset.id));
+                showNotification(tp('activated'), 'success');
+                await loadTokenPoolData(tokenPoolCurrentIndex);
+                if (window.loadConfig) {
+                    window.loadConfig();
+                }
+            } catch (error) {
+                const message = error?.message || String(error);
+                showNotification(tp('failed', { error: message }), 'error');
+            }
+        });
+    });
+
+    bodyEl.querySelectorAll('.token-pool-more-toggle').forEach((button) => {
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+
+            const wrap = button.closest('.token-pool-more-wrap');
+            const menu = wrap?.querySelector('.token-pool-more-menu');
+            if (!menu) {
+                return;
+            }
+
+            const shouldOpen = !menu.classList.contains('show');
+            closeAllTokenPoolActionMenus(bodyEl);
+            if (shouldOpen) {
+                menu.classList.add('show');
+            }
+        });
+    });
+
+    bodyEl.querySelectorAll('.token-pool-more-menu').forEach((menu) => {
+        menu.addEventListener('click', (event) => {
+            event.stopPropagation();
+        });
+    });
+
+    bodyEl.querySelectorAll('.token-pool-error-view').forEach((button) => {
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const errorId = button.dataset.errorId;
+            const errorText = errorId ? tokenPoolErrorCache.get(String(errorId)) || '' : '';
+            showTokenPoolErrorDialog(errorText);
+        });
+    });
+
+    bodyEl.querySelectorAll('.token-pool-rate-error-view').forEach((button) => {
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            showTokenPoolErrorDialog(button.dataset.error || '');
+        });
+    });
+
+    bodyEl.querySelectorAll('.token-pool-usage').forEach((button) => {
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const credentialID = String(button.dataset.id || '');
+            const row = button.closest('tr');
+            const accountText = row?.querySelector('td code')?.textContent?.trim() || '';
+            const label = accountText || '';
+            const usage = tokenPoolUsageCache.get(credentialID) || null;
+            showTokenPoolUsageDialog(label, usage);
+            closeAllTokenPoolActionMenus(bodyEl);
+        });
+    });
+
+    bodyEl.querySelectorAll('.token-pool-update').forEach((button) => {
+        button.addEventListener('click', async () => {
+            const result = await showTokenPoolUpdateTokenDialog();
+            if (!result) {
+                return;
+            }
+            try {
+                await window.go.main.App.UpdateEndpointCredentialToken(
+                    tokenPoolCurrentIndex,
+                    Number(button.dataset.id),
+                    result.token,
+                    result.expiresAt
+                );
+                showNotification(tp('updatedToken'), 'success');
+                await loadTokenPoolData(tokenPoolCurrentIndex);
+                if (window.loadConfig) {
+                    window.loadConfig();
+                }
+            } catch (error) {
+                const message = error?.message || String(error);
+                showNotification(tp('failed', { error: message }), 'error');
+            }
+            closeAllTokenPoolActionMenus(bodyEl);
+        });
+    });
+
+    bodyEl.querySelectorAll('.token-pool-rate-refresh').forEach((button) => {
+        button.addEventListener('click', async () => {
+            const credentialID = Number(button.dataset.id);
+            if (!Number.isFinite(credentialID) || credentialID <= 0) {
+                showNotification(tp('invalidCredentialId'), 'error');
+                return;
+            }
+            const row = button.closest('tr');
+            const accountText = row?.querySelector('td code')?.textContent?.trim() || '';
+            const label = accountText ? `${accountText} (#${credentialID})` : `#${credentialID}`;
+            const modal = ensureTokenPoolModal();
+            try {
+                setTokenPoolHint(modal, tp('refreshingLimitsFor', { label }));
+                const raw = await window.go.main.App.FetchCodexRateLimitsForCredential(tokenPoolCurrentIndex, credentialID);
+                const result = parseAppJSON(raw);
+                if (!result.success) {
+                    throw new Error(result.error || tp('limitsRefreshFailed', { error: tp('unknownError') }));
+                }
+                const data = result.data || {};
+                const detail = `+${data.updated || 0}, ${data.failed || 0}, ${data.skipped || 0}`;
+                await loadTokenPoolData(tokenPoolCurrentIndex);
+                const refreshedRow = modal.querySelector(`.token-pool-rate-refresh[data-id="${credentialID}"]`)?.closest('tr');
+                const rateMain = refreshedRow?.querySelector('.token-pool-rate-main')?.textContent?.trim();
+                const rateStatus = refreshedRow?.querySelector('.token-pool-rate-status')?.textContent?.trim();
+                const rateSummary = rateMain || rateStatus || '-';
+                showNotification(tp('limitsRefreshedFor', { label, summary: rateSummary, detail }), 'success');
+                setTokenPoolHint(modal, tp('limitsRefreshedFor', { label, summary: rateSummary, detail }));
+            } catch (error) {
+                const message = error?.message || String(error);
+                showNotification(tp('limitsRefreshFailed', { error: message }), 'error');
+                setTokenPoolHint(modal, tp('limitsRefreshFailed', { error: message }));
+            } finally {
+                closeAllTokenPoolActionMenus(bodyEl);
+            }
+        });
+    });
+
+    bodyEl.querySelectorAll('.token-pool-refresh-token').forEach((button) => {
+        button.addEventListener('click', async () => {
+            const credentialID = Number(button.dataset.id);
+            if (!Number.isFinite(credentialID) || credentialID <= 0) {
+                showNotification(tp('invalidCredentialId'), 'error');
+                return;
+            }
+            const row = button.closest('tr');
+            const accountText = row?.querySelector('td code')?.textContent?.trim() || '';
+            const label = accountText ? `${accountText} (#${credentialID})` : `#${credentialID}`;
+            const modal = ensureTokenPoolModal();
+            try {
+                setTokenPoolHint(modal, tp('refreshingTokenFor', { label }));
+                const raw = await window.go.main.App.RefreshEndpointCredential(tokenPoolCurrentIndex, credentialID);
+                const result = parseAppJSON(raw);
+                if (!result.success) {
+                    throw new Error(result.error || tp('tokenRefreshFailed', { error: tp('unknownError') }));
+                }
+                showNotification(tp('tokenRefreshedFor', { label }), 'success');
+                await loadTokenPoolData(tokenPoolCurrentIndex);
+                setTokenPoolHint(modal, tp('tokenRefreshedFor', { label }));
+            } catch (error) {
+                const message = error?.message || String(error);
+                showNotification(tp('tokenRefreshFailed', { error: message }), 'error');
+                setTokenPoolHint(modal, tp('tokenRefreshFailed', { error: message }));
+                await loadTokenPoolData(tokenPoolCurrentIndex);
+            } finally {
+                closeAllTokenPoolActionMenus(bodyEl);
+            }
+        });
+    });
+
+    bodyEl.querySelectorAll('.token-pool-delete').forEach((button) => {
+        button.addEventListener('click', async () => {
+            try {
+                const credentialID = Number(button.dataset.id);
+                if (!Number.isFinite(credentialID) || credentialID <= 0) {
+                    throw new Error(`${tp('invalidCredentialId')}: ${button.dataset.id}`);
+                }
+
+                showNotification(tp('deletingCredential', { id: credentialID }), 'info');
+                await window.go.main.App.DeleteEndpointCredential(tokenPoolCurrentIndex, credentialID);
+                showNotification(tp('credentialDeleted'), 'success');
+                await loadTokenPoolData(tokenPoolCurrentIndex);
+                if (window.loadConfig) {
+                    window.loadConfig();
+                }
+            } catch (error) {
+                const message = error?.message || String(error);
+                showNotification(tp('failed', { error: message }), 'error');
+            }
+            closeAllTokenPoolActionMenus(bodyEl);
+        });
+    });
+}
+
+async function refreshTokenPoolRateLimits(index) {
+    if (index < 0) {
+        return;
+    }
+
+    const modal = ensureTokenPoolModal();
+    const button = modal.querySelector('#tokenPoolRateRefreshBtn');
+    try {
+        if (button) {
+            button.disabled = true;
+            button.textContent = tp('refreshing');
+        }
+        setTokenPoolHint(modal, tp('fetchingLimits'));
+
+        const raw = await window.go.main.App.FetchCodexRateLimits(index);
+        const result = parseAppJSON(raw);
+        if (!result.success) {
+            throw new Error(result.error || tp('limitsRefreshFailed', { error: tp('unknownError') }));
+        }
+
+        const data = result.data || {};
+        showNotification(tp('limitsRefreshed', { updated: data.updated || 0, failed: data.failed || 0, skipped: data.skipped || 0 }), 'success');
+        await loadTokenPoolData(index);
+    } catch (error) {
+        const message = error?.message || String(error);
+        showNotification(tp('limitsRefreshFailed', { error: message }), 'error');
+        setTokenPoolHint(modal, tp('limitsRefreshFailed', { error: message }));
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = tp('refreshLimits');
+        }
+    }
+}
+
+async function handleTokenPoolImport() {
+    if (tokenPoolCurrentIndex < 0) {
+        return;
+    }
+
+    const modal = ensureTokenPoolModal();
+    const input = modal.querySelector('#tokenPoolImportInput');
+    const overwrite = modal.querySelector('#tokenPoolOverwrite')?.checked === true;
+    const raw = (input?.value || '').trim();
+
+    if (!raw) {
+        showNotification(tp('pleasePasteJson'), 'warning');
+        return;
+    }
+
+    try {
+        JSON.parse(raw);
+    } catch {
+        showNotification(tp('invalidJson'), 'error');
+        return;
+    }
+
+    try {
+        const resultRaw = await window.go.main.App.ImportEndpointCredentials(tokenPoolCurrentIndex, raw, overwrite);
+        const result = parseAppJSON(resultRaw);
+        if (!result.success) {
+            throw new Error(result.error || 'Import failed');
+        }
+
+        const data = result.data || {};
+        showNotification(
+            tp('importDone', { created: data.created || 0, updated: data.updated || 0, skipped: data.skipped || 0, failed: data.failed || 0 }),
+            'success'
+        );
+        input.value = '';
+        await loadTokenPoolData(tokenPoolCurrentIndex);
+        if (window.loadConfig) {
+            window.loadConfig();
+        }
+    } catch (error) {
+        const message = error?.message || String(error);
+        showNotification(tp('importFailed', { error: message }), 'error');
+    }
+}
+
+async function handleTokenPoolFileImport() {
+    if (tokenPoolCurrentIndex < 0) {
+        return;
+    }
+
+    const modal = ensureTokenPoolModal();
+    const overwrite = modal.querySelector('#tokenPoolOverwrite')?.checked === true;
+
+    try {
+        setTokenPoolHint(modal, tp('openingFilePicker'));
+        const resultRaw = await window.go.main.App.ImportEndpointCredentialsFromFiles(tokenPoolCurrentIndex, overwrite);
+        const result = parseAppJSON(resultRaw);
+        if (!result.success) {
+            throw new Error(result.error || tp('importFailed', { error: tp('unknownError') }));
+        }
+
+        const data = result.data || {};
+        if ((data.processed || 0) === 0 && (data.failed || 0) === 0) {
+            showNotification(tp('noFilesSelected'), 'warning');
+            setTokenPoolHint(modal, tp('noFilesSelectedHint'));
+            return;
+        }
+
+        showNotification(
+            tp('importFilesDone', { created: data.created || 0, updated: data.updated || 0, skipped: data.skipped || 0, failed: data.failed || 0 }),
+            (data.failed || 0) > 0 ? 'warning' : 'success'
+        );
+        await loadTokenPoolData(tokenPoolCurrentIndex);
+        if (window.loadConfig) {
+            window.loadConfig();
+        }
+    } catch (error) {
+        const message = error?.message || String(error);
+        if (message.toLowerCase().includes('no files selected')) {
+            showNotification(tp('noFilesSelected'), 'warning');
+            setTokenPoolHint(modal, tp('noFilesSelectedHint'));
+            return;
+        }
+        showNotification(tp('importFilesFailed', { error: message }), 'error');
+        setTokenPoolHint(modal, tp('importFilesFailed', { error: message }));
+    }
+}
+
+export async function openTokenPoolModal(index, endpointName = '') {
+    tokenPoolCurrentIndex = index;
+    const modal = ensureTokenPoolModal();
+    const title = modal.querySelector('#tokenPoolTitle');
+    title.textContent = `🪪 ${tp('title')}${endpointName ? `: ${endpointName}` : ''}`;
+    modal.classList.add('active');
+    await loadTokenPoolProxySetting();
+
+    try {
+        await loadTokenPoolData(index);
+    } catch (error) {
+        const message = error?.message || String(error);
+        showNotification(tp('failed', { error: message }), 'error');
+    }
+}
+
+// 克隆端点配置（创建副本）
+function copyEndpointConfig(index, button) {
+    const allEndpoints = window.config?.endpoints || [];
+    
+    if (index < 0 || index >= allEndpoints.length) {
+        const errorMsg = `Invalid index ${index} for cloning endpoint. Total endpoints: ${allEndpoints.length} at ${new Date().toISOString()}`;
+        console.error(errorMsg);
+        if (typeof window.logError === 'function') {
+            window.logError(errorMsg);
+        }
+        showNotification(t('endpoints.cloneFailed') + ': ' + (t('endpoints.invalidIndex') || `Invalid index ${index}`), 'error');
+        return;
+    }
+    
+    const endpoint = allEndpoints[index];
+    
+    if (endpoint) {
+        const clonedEndpoint = { ...endpoint };
+        
+        const baseName = extractBaseName(endpoint.name);
+        const copySuffix = '(Copy)';
+        
+        let newName = `${baseName}${copySuffix}`;
+        let counter = 1;
+        while (allEndpoints.some(ep => ep.name === newName)) {
+            newName = `${baseName}${copySuffix} ${counter}`;
+            counter++;
+        }
+        clonedEndpoint.name = newName;
+        
+        if (clonedEndpoint.authMode === "token_pool") {
+            delete clonedEndpoint.apiKey;
+        }
+        
+        const originalHTML = button.innerHTML;
+        button.innerHTML = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" width="1em" height="1em"><path d="M20 6L9 17l-5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        setTimeout(() => { button.innerHTML = originalHTML; }, 1000);
+        
+        showNotification(t('endpoints.cloned') || 'Endpoint cloned successfully', 'success');
+        
+        window.clonedEndpointData = clonedEndpoint;
+        
+        if (typeof window.showAddEndpointModalWithPreset === 'function') {
+            try {
+                window.showAddEndpointModalWithPreset(clonedEndpoint);
+            } catch (error) {
+                const errorMsg = `Error calling showAddEndpointModalWithPreset at ${new Date().toISOString()}: ${error.message}\nStack: ${error.stack}`;
+                console.error(errorMsg);
+                try {
+                    if (typeof window.logError === 'function') {
+                        window.logError(errorMsg);
+                    }
+                } catch (logErr) {
+                    console.error('Failed to call logError:', logErr);
+                }
+                showNotification(t('endpoints.cloneFailed') + ': ' + error.message || `Failed to clone endpoint: ${error.message}`, 'error');
+            }
+        } else {
+            const errorMsg = `showAddEndpointModalWithPreset function is not available at ${new Date().toISOString()}`;
+            console.error(errorMsg);
+            if (typeof window.logError === 'function') {
+                window.logError(errorMsg);
+            }
+            showNotification(t('endpoints.cloneFailed') + ': ' + t('endpoints.functionUnavailable') || 'Failed to clone endpoint: Function not available', 'error');
+        }
+    } else {
+        const errorMsg = `Failed to clone endpoint: endpoint data not found at index ${index} at ${new Date().toISOString()}`;
+        console.error(errorMsg);
+        if (typeof window.logError === 'function') {
+            window.logError(errorMsg);
+        }
+        showNotification(t('endpoints.cloneFailed') + ': ' + (t('endpoints.noEndpointAtIdxWithIndex') || `No endpoint found at index ${index}`), 'error');
+    }
 }
 
 export function toggleEndpointPanel() {
@@ -473,11 +1591,12 @@ export async function checkAllEndpointsOnStartup() {
 }
 
 // 渲染简洁视图
-function renderCompactView(sortedEndpoints, container, currentEndpointName) {
+function renderCompactView(sortedEndpoints, container, currentEndpointName, isFiltered) {
     sortedEndpoints.forEach(({ endpoint: ep, originalIndex: index, stats }) => {
         const enabled = ep.enabled !== undefined ? ep.enabled : true;
         const transformer = ep.transformer || 'claude';
         const model = ep.model || '';
+        const authMode = ep.authMode || 'api_key';
         const isCurrentEndpoint = ep.name === currentEndpointName;
 
         // 获取测试状态
@@ -494,9 +1613,18 @@ function renderCompactView(sortedEndpoints, container, currentEndpointName) {
 
         const item = document.createElement('div');
         item.className = 'endpoint-item-compact';
-        item.draggable = true;
         item.dataset.name = ep.name;
         item.dataset.index = index;
+
+        // 筛选激活时禁用拖拽
+        if (isFiltered) {
+            item.draggable = false;
+            item.style.cursor = 'default';
+            item.title = t('endpoints.dragDisabledDuringFilter');
+        } else {
+            item.draggable = true;
+            setupCompactDragAndDrop(item, container);
+        }
 
         // 截断 URL 显示
         const displayUrl = ep.apiUrl.length > 40 ? ep.apiUrl.substring(0, 40) + '...' : ep.apiUrl;
@@ -533,6 +1661,7 @@ function renderCompactView(sortedEndpoints, container, currentEndpointName) {
                     <div class="compact-more-menu">
                         <button data-action="test" data-index="${index}">🧪 ${t('endpoints.test')}</button>
                         <button data-action="edit" data-index="${index}">✏️ ${t('endpoints.edit')}</button>
+                        <button data-action="copy" data-index="${index}">📋 ${t('endpoints.copy')}</button>
                         <button data-action="delete" data-index="${index}" class="danger">🗑️ ${t('endpoints.delete')}</button>
                     </div>
                 </div>
@@ -579,7 +1708,7 @@ function bindCompactItemEvents(item, index, enabled) {
             window.loadConfig();
         } catch (error) {
             console.error('Failed to toggle endpoint:', error);
-            alert('Failed to toggle endpoint: ' + error);
+            alert(t('endpoints.toggleFailed') + ': ' + error);
             e.target.checked = !newEnabled;
         }
     });
@@ -621,6 +1750,14 @@ function bindCompactItemEvents(item, index, enabled) {
         const idx = parseInt(testBtn.getAttribute('data-index'));
         window.testEndpoint(idx, testBtn);
     });
+
+    // 复制按钮
+    const copyBtn = item.querySelector('[data-action="copy"]');
+    copyBtn.addEventListener('click', () => {
+        closeAllDropdowns();
+        const idx = parseInt(copyBtn.getAttribute('data-index'));
+        copyEndpointConfig(idx, copyBtn);
+});
 
     // 编辑按钮
     editBtn.addEventListener('click', () => {
@@ -871,5 +2008,42 @@ async function handleContainerDrop(e) {
             alert(t('endpoints.reorderFailed') + ': ' + error);
             window.loadConfig();
         }
+    }
+}
+
+// Incremental endpoint stats update - updates only the numbers in the endpoint card without re-rendering
+export function updateEndpointStatsIncremental(endpointName, data) {
+    // Find endpoint card by name (works for both detail and compact views)
+    const endpointCard = document.querySelector(`[data-name="${endpointName}"]`);
+    if (!endpointCard) {
+        return; // Endpoint not found or filtered out
+    }
+
+    const totalTokens = (data.inputTokens || 0) + (data.outputTokens || 0);
+
+    // Update stats in detail view
+    const paragraphs = endpointCard.querySelectorAll('p');
+    for (const p of paragraphs) {
+        const text = p.textContent;
+
+        // Update requests/errors line
+        if (text.includes('📊') && text.includes(t('endpoints.requests'))) {
+            p.innerHTML = `📊 ${t('endpoints.requests')}: ${data.requests} | ${t('endpoints.errors')}: ${data.errors}`;
+        }
+
+        // Update tokens line
+        if (text.includes('🎯') && text.includes(t('endpoints.tokens'))) {
+            p.innerHTML = `🎯 ${t('endpoints.tokens')}: ${formatTokens(totalTokens)} (${t('statistics.in')}: ${formatTokens(data.inputTokens)}, ${t('statistics.out')}: ${formatTokens(data.outputTokens)})`;
+        }
+    }
+
+    // Update stats in compact view
+    const compactStats = endpointCard.querySelector('.compact-stats');
+    if (compactStats) {
+        compactStats.textContent = `📊 ${data.requests} | 🎯 ${formatTokens(totalTokens)}`;
+
+        // Update tooltip
+        const tooltip = `${t('endpoints.requests')}: ${data.requests} | ${t('endpoints.errors')}: ${data.errors}\n${t('statistics.in')}: ${formatTokens(data.inputTokens)} | ${t('statistics.out')}: ${formatTokens(data.outputTokens)}`;
+        compactStats.title = tooltip;
     }
 }

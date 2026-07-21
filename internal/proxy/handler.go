@@ -35,6 +35,9 @@ func (p *Proxy) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // maskAPIKey masks an API key for security, showing only first 4 and last 4 characters
 func maskAPIKey(key string) string {
+	if key == "" {
+		return ""
+	}
 	if len(key) <= 8 {
 		return "****"
 	}
@@ -155,6 +158,12 @@ func (p *Proxy) UpdateConfig(cfg *config.Config) error {
 		}
 	} else {
 		p.currentIndex = 0
+	}
+
+	// Clear models cache to force refresh with new endpoints
+	if p.modelsCache != nil {
+		p.modelsCache.Clear()
+		logger.Debug("[CONFIG UPDATE] Cleared models cache")
 	}
 
 	logger.Info("Configuration updated: %d endpoints configured", len(cfg.GetEndpoints()))
