@@ -38,7 +38,12 @@ export default {
         import: 'Import',
         export: 'Export',
         required: 'Required',
-        optional: 'Optional'
+        optional: 'Optional',
+        skipToContent: 'Skip to main content',
+        switchToLightTheme: 'Switch to light theme',
+        switchToDarkTheme: 'Switch to dark theme',
+        pageTitle: 'ccNexus - Admin Dashboard',
+        unknown: 'Unknown'
     },
     dashboard: {
         title: 'Dashboard',
@@ -51,7 +56,10 @@ export default {
         recentActivity: 'Recent Activity',
         requests: 'Requests',
         noEndpoints: 'No endpoints configured',
-        noEnabledEndpoints: 'No enabled endpoints'
+        noEnabledEndpoints: 'No enabled endpoints',
+        failedToLoad: 'Failed to load dashboard data',
+        chartUnavailable: 'Chart unavailable. Statistics are still available in the table.',
+        noActivityData: 'No activity data yet.'
     },
     endpoints: {
         title: 'Endpoints',
@@ -73,18 +81,21 @@ export default {
         tokenPoolManagement: 'Token Pool',
         deleteEndpoint: 'Delete',
         cloneEndpoint: 'Clone',
+        copySuffix: '(Copy)',
         noEndpoints: 'No Endpoints',
         noEndpointsMessage: 'Add your first endpoint to get started',
         editEndpoint: 'Edit',
-        addEndpoint: 'Add Endpoint',
-        cloneEndpoint: 'Clone',
         remark: 'Remark',
         fetchModels: 'Fetch Models',
         fetchModelsHint: 'Click "Fetch Models" to load available models from the API',
+        codexModelsUnavailable: 'Model discovery is unavailable for Codex Token Pool endpoints.',
+        apiKeyModeHint: 'Requests authenticate with the saved API key.',
+        tokenPoolModeHint: 'Save the endpoint, then manage its credentials from Token Pool.',
+        codexTokenPoolModeHint: 'The Codex URL and Responses transformer are managed automatically.',
         modelPlaceholder: 'gpt-4, gemini-pro, etc.',
         apiKeyPlaceholder: 'sk-...',
         apiUrlPlaceholder: 'https://api.example.com',
-        keepExistingKey: 'Leave as **** to keep existing key',
+        keepExistingKey: 'Leave blank to keep the saved key',
         selectModel: 'Select Model',
         noModelsFound: 'No models found',
         testEndpoint: 'Test',
@@ -99,7 +110,7 @@ export default {
         endpointCreated: 'Endpoint created successfully',
         endpointUpdated: 'Endpoint updated successfully',
         endpointDeleted: 'Endpoint deleted successfully',
-        endpointCloned: 'Endpoint cloned. Please save to create a new endpoint.',
+        endpointCloned: 'Endpoint cloned successfully',
         endpointSwitched: 'Switched to endpoint: ',
         endpointEnabled: 'Endpoint enabled',
         endpointDisabled: 'Endpoint disabled',
@@ -115,7 +126,7 @@ export default {
         failedToClone: 'Failed to clone',
         failedToCopy: 'Failed to copy to clipboard',
         urlCopied: 'URL copied',
-        enterApiUrlAndKey: 'Please enter API URL and API Key first',
+        enterApiUrlAndKey: 'Enter an API URL and API key, or save the endpoint first',
         modelSelected: 'Model selected: ',
         tokenPoolTitle: 'Token Pool: ',
         total: 'Total',
@@ -141,6 +152,7 @@ export default {
         credentialDisabled: 'Credential disabled',
         credentialActivated: 'Credential activated',
         tokenUpdated: 'Credential token updated',
+        noCredentialChanges: 'There are no credential changes to save.',
         credentialDeleted: 'Credential deleted',
         failedToLoadTokenPool: 'Failed to load token pool',
         failedToImport: 'Import failed',
@@ -152,7 +164,34 @@ export default {
         confirmDeleteCredential: 'Delete credential #{id}?',
         pleasePasteJson: 'Please paste credential JSON first',
         invalidJson: 'Invalid JSON',
-        failedToUpdateToken: 'Failed to update token'
+        failedToUpdateToken: 'Failed to update token',
+        reorder: 'Reorder',
+        authMode: 'Authentication',
+        apiKeyConfigured: 'API key configured',
+        apiKeyMissing: 'API key not configured',
+        clearApiKey: 'Clear saved API key',
+        clearApiKeyTitle: 'Confirm API key removal',
+        confirmClearApiKey: 'Saving will remove the stored API key and may make this endpoint unavailable. Continue?',
+        apiKeyRequired: 'API key is required for a new API key endpoint.',
+        fetchingModels: 'Fetching...',
+        tokenPoolUnavailable: 'Token Pool is only available for Token Pool authentication modes.',
+        updateCredential: 'Update credential token',
+        deleteCredential: 'Delete credential',
+        tokens: 'Tokens',
+        accessToken: 'Access token',
+        refreshToken: 'Refresh token',
+        idToken: 'ID token',
+        keepExistingToken: 'Leave blank to keep the saved token',
+        tokenConfigured: 'Token configured',
+        tokenMissing: 'Token not configured',
+        clearRefreshToken: 'Clear saved refresh token',
+        clearIdToken: 'Clear saved ID token',
+        credentialNotFound: 'Credential no longer exists. Refresh and try again.'
+    },
+    errors: {
+        invalidJSONResponse: 'Server returned an invalid JSON response',
+        requestFailed: 'Request failed ({status})',
+        networkError: 'Network connection failed. Check that the service is available.'
     },
     stats: {
         title: 'Statistics',
@@ -173,6 +212,7 @@ export default {
     },
     testing: {
         title: 'Endpoint Testing',
+        endpoint: 'Endpoint',
         selectEndpoint: 'Select Endpoint',
         runTest: 'Run Test',
         loadingEndpoints: 'Loading...',
@@ -192,7 +232,7 @@ export default {
         endpointCreated: 'Endpoint created successfully',
         endpointUpdated: 'Endpoint updated successfully',
         endpointDeleted: 'Endpoint deleted successfully',
-        endpointCloned: 'Endpoint cloned. Please save to create a new endpoint.',
+        endpointCloned: 'Endpoint cloned successfully',
         endpointSwitched: 'Switched to endpoint: ',
         endpointEnabled: 'Endpoint enabled',
         endpointDisabled: 'Endpoint disabled',
@@ -205,13 +245,19 @@ export default {
         credentialActivated: 'Credential activated',
         tokenUpdated: 'Credential token updated',
         credentialDeleted: 'Credential deleted',
-        urlCopied: 'URL copied'
+        urlCopied: 'URL copied',
+        realtimeDisconnected: 'Real-time connection lost. Reconnecting automatically.',
+        realtimeRestored: 'Real-time connection restored'
     },
     transformers: {
         claude: 'Claude',
         openai: 'OpenAI',
         openai2: 'OpenAI Responses',
-        gemini: 'Gemini',
-        deepseek: 'DeepSeek'
+        gemini: 'Gemini'
+    },
+    authModes: {
+        api_key: 'API Key',
+        token_pool: 'Token Pool',
+        codex_token_pool: 'Codex Token Pool'
     }
 };

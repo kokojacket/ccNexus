@@ -87,7 +87,7 @@ func (p *Proxy) fetchModelsFromEndpoint(ep config.Endpoint) ([]ModelInfo, error)
 		}
 		req, err = http.NewRequest("GET", modelsURL, nil)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %w", err)
+			return nil, fmt.Errorf("failed to create request: %s", redactEndpointMessage(err.Error(), ep))
 		}
 		// Add authorization header
 		if ep.AuthMode == config.AuthModeAPIKey && ep.APIKey != "" {
@@ -102,13 +102,16 @@ func (p *Proxy) fetchModelsFromEndpoint(ep config.Endpoint) ([]ModelInfo, error)
 		} else {
 			modelsURL = baseURL + "/v1beta/models"
 		}
-		// Add API key as query parameter
 		if ep.AuthMode == config.AuthModeAPIKey && ep.APIKey != "" {
-			modelsURL = modelsURL + "?key=" + ep.APIKey
+			req, err = http.NewRequest("GET", modelsURL, nil)
+			if err == nil {
+				req.Header.Set("x-goog-api-key", ep.APIKey)
+			}
+		} else {
+			req, err = http.NewRequest("GET", modelsURL, nil)
 		}
-		req, err = http.NewRequest("GET", modelsURL, nil)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %w", err)
+			return nil, fmt.Errorf("failed to create request: %s", redactEndpointMessage(err.Error(), ep))
 		}
 
 	default:
@@ -122,7 +125,7 @@ func (p *Proxy) fetchModelsFromEndpoint(ep config.Endpoint) ([]ModelInfo, error)
 	// Execute request
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch models: %w", err)
+		return nil, fmt.Errorf("failed to fetch models: %s", redactEndpointMessage(err.Error(), ep))
 	}
 	defer resp.Body.Close()
 
@@ -133,10 +136,10 @@ func (p *Proxy) fetchModelsFromEndpoint(ep config.Endpoint) ([]ModelInfo, error)
 	// Parse response
 	var result struct {
 		Data []struct {
-			ID         string `json:"id"`
-			Object     string `json:"object"`
-			Created    int64  `json:"created"`
-			OwnedBy    string `json:"owned_by"`
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			Created int64  `json:"created"`
+			OwnedBy string `json:"owned_by"`
 		} `json:"data"`
 	}
 
@@ -215,7 +218,8 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 
 	// Check for refresh parameter
 	refresh := r.URL.Query().Get("refresh") == "true"
-	refreshEnabled := p.config.ModelsCacheRefreshEnabled
+	cfg := p.configSnapshot()
+	refreshEnabled := cfg.ModelsCacheRefreshEnabled
 
 	if refresh && !refreshEnabled {
 		http.Error(w, "Refresh is disabled in configuration", http.StatusForbidden)
@@ -231,7 +235,7 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch from endpoints
-	endpoints := p.config.GetEndpoints()
+	endpoints := cfg.GetEndpoints()
 	allModels := []ModelInfo{}
 	allFailed := true
 
@@ -246,8 +250,8 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 		// Try to fetch from endpoint's /v1/models API
 		models, err = p.fetchModelsFromEndpoint(ep)
 		if err != nil {
-		// If fetch fails, use default models for this endpoint
-		logger.Debug("Failed to fetch models from %s: %v", ep.Name, err)
+			// If fetch fails, use default models for this endpoint
+			logger.Debug("Failed to fetch models from %s: %v", ep.Name, err)
 			models = p.getDefaultModels(ep)
 		} else {
 			allFailed = false
@@ -274,8 +278,8 @@ func (p *Proxy) writeModelsResponse(w http.ResponseWriter, models []ModelInfo) {
 	w.WriteHeader(http.StatusOK)
 
 	response := struct {
-		Object string       `json:"object"`
-		Data   []ModelInfo  `json:"data"`
+		Object string      `json:"object"`
+		Data   []ModelInfo `json:"data"`
 	}{
 		Object: "list",
 		Data:   models,
@@ -290,7 +294,8 @@ func (p *Proxy) writeModelsResponse(w http.ResponseWriter, models []ModelInfo) {
 func (p *Proxy) refreshModelsCache() {
 	logger.Debug("Refreshing models cache in background")
 
-	endpoints := p.config.GetEndpoints()
+	cfg := p.configSnapshot()
+	endpoints := cfg.GetEndpoints()
 	allModels := []ModelInfo{}
 
 	for _, ep := range endpoints {

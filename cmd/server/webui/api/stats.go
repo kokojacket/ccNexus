@@ -14,26 +14,30 @@ func (h *Handler) handleStatsSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	totalRequests, endpointStats := h.proxy.GetStats().GetStats()
+	WriteSuccess(w, h.statsSummary())
+}
 
-	// Calculate totals
+func (h *Handler) statsSummary() map[string]interface{} {
+	totalSuccess, endpointStats := h.proxy.GetStats().GetStats()
 	totalErrors := 0
 	var totalInputTokens int64 = 0
 	var totalOutputTokens int64 = 0
 
 	for _, stats := range endpointStats {
 		totalErrors += stats.Errors
+		stats.Requests += stats.Errors
 		totalInputTokens += int64(stats.InputTokens)
 		totalOutputTokens += int64(stats.OutputTokens)
 	}
 
-	WriteSuccess(w, map[string]interface{}{
-		"TotalRequests":     totalRequests,
+	return map[string]interface{}{
+		"TotalRequests":     totalSuccess + totalErrors,
+		"TotalSuccess":      totalSuccess,
 		"TotalErrors":       totalErrors,
 		"TotalInputTokens":  totalInputTokens,
 		"TotalOutputTokens": totalOutputTokens,
 		"Endpoints":         endpointStats,
-	})
+	}
 }
 
 // handleStatsDaily returns today's statistics
@@ -181,27 +185,29 @@ func (h *Handler) getStatsForPeriod(startDate, endDate string) (map[string]inter
 	}
 
 	totalRequests := 0
+	totalSuccess := 0
 	totalErrors := 0
 	var totalInputTokens int64 = 0
 	var totalOutputTokens int64 = 0
 	endpointStats := make(map[string]interface{})
 
 	for endpointName, stats := range allStats {
-		epRequests := 0
+		epSuccess := 0
 		epErrors := 0
 		var epInputTokens int64 = 0
 		var epOutputTokens int64 = 0
 
 		for _, stat := range stats {
 			if stat.Date >= startDate && stat.Date <= endDate {
-				epRequests += stat.Requests
+				epSuccess += stat.Requests
 				epErrors += stat.Errors
 				epInputTokens += int64(stat.InputTokens)
 				epOutputTokens += int64(stat.OutputTokens)
 			}
 		}
 
-		if epRequests > 0 {
+		epRequests := epSuccess + epErrors
+		if epRequests > 0 || epInputTokens > 0 || epOutputTokens > 0 {
 			endpointStats[endpointName] = map[string]interface{}{
 				"requests":     epRequests,
 				"errors":       epErrors,
@@ -211,6 +217,7 @@ func (h *Handler) getStatsForPeriod(startDate, endDate string) (map[string]inter
 
 			totalRequests += epRequests
 			totalErrors += epErrors
+			totalSuccess += epSuccess
 			totalInputTokens += epInputTokens
 			totalOutputTokens += epOutputTokens
 		}
@@ -219,7 +226,7 @@ func (h *Handler) getStatsForPeriod(startDate, endDate string) (map[string]inter
 	return map[string]interface{}{
 		"totalRequests":     totalRequests,
 		"totalErrors":       totalErrors,
-		"totalSuccess":      totalRequests - totalErrors,
+		"totalSuccess":      totalSuccess,
 		"totalInputTokens":  totalInputTokens,
 		"totalOutputTokens": totalOutputTokens,
 		"endpoints":         endpointStats,

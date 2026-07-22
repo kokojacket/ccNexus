@@ -236,7 +236,7 @@ func (c *Config) Validate() error {
 		if c.Endpoints[i].APIUrl == "" {
 			return fmt.Errorf("endpoint %d: apiUrl is required", i+1)
 		}
-		if c.Endpoints[i].AuthMode == AuthModeAPIKey && strings.TrimSpace(c.Endpoints[i].APIKey) == "" {
+		if c.Endpoints[i].Enabled && c.Endpoints[i].AuthMode == AuthModeAPIKey && strings.TrimSpace(c.Endpoints[i].APIKey) == "" {
 			return fmt.Errorf("endpoint %d: apiKey is required", i+1)
 		}
 
@@ -288,6 +288,13 @@ func (c *Config) GetBasicAuthPassword() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.BasicAuthPassword
+}
+
+// GetBasicAuth returns one consistent Basic Auth snapshot (thread-safe).
+func (c *Config) GetBasicAuth() (enabled bool, username, password string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.BasicAuthEnabled, c.BasicAuthUsername, c.BasicAuthPassword
 }
 
 // UpdateBasicAuth updates Basic Auth configuration (thread-safe)

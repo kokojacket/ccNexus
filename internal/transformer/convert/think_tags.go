@@ -7,14 +7,24 @@ import (
 )
 
 const (
-	thinkTagOpen  = "<think>"
-	thinkTagClose = "</think>"
+	thinkTagOpen     = "<think>"
+	thinkTagClose    = "</think>"
+	thinkingTagOpen  = "<thinking>"
+	thinkingTagClose = "</thinking>"
 )
+
+var thinkTags = []struct {
+	open  string
+	close string
+}{
+	{open: thinkTagOpen, close: thinkTagClose},
+	{open: thinkingTagOpen, close: thinkingTagClose},
+}
 
 func splitThinkTaggedText(text string) []map[string]interface{} {
 	var blocks []map[string]interface{}
 	for {
-		openIdx := strings.Index(text, thinkTagOpen)
+		openIdx, _, closeTag := findOpeningThinkTag(text)
 		if openIdx == -1 {
 			if text != "" {
 				blocks = append(blocks, map[string]interface{}{"type": "text", "text": text})
@@ -24,8 +34,9 @@ func splitThinkTaggedText(text string) []map[string]interface{} {
 		if openIdx > 0 {
 			blocks = append(blocks, map[string]interface{}{"type": "text", "text": text[:openIdx]})
 		}
-		text = text[openIdx+len(thinkTagOpen):]
-		closeIdx := strings.Index(text, thinkTagClose)
+		_, openTag, _ := findOpeningThinkTag(text[openIdx:])
+		text = text[openIdx+len(openTag):]
+		closeIdx := strings.Index(text, closeTag)
 		if closeIdx == -1 {
 			if text != "" {
 				blocks = append(blocks, map[string]interface{}{"type": "text", "text": text})
@@ -35,16 +46,20 @@ func splitThinkTaggedText(text string) []map[string]interface{} {
 		if closeIdx > 0 {
 			blocks = append(blocks, map[string]interface{}{"type": "thinking", "thinking": text[:closeIdx]})
 		}
-		text = text[closeIdx+len(thinkTagClose):]
+		text = text[closeIdx+len(closeTag):]
 	}
 }
 
 func consumeThinkTaggedStream(content string, ctx *transformer.StreamContext, emitText func(string), emitThinking func(string)) {
 	for len(content) > 0 {
 		if ctx.InThinkingTag {
-			closeIdx := strings.Index(content, thinkTagClose)
+			closeTag := ctx.ThinkingTagClose
+			if closeTag == "" {
+				closeTag = thinkTagClose
+			}
+			closeIdx := strings.Index(content, closeTag)
 			if closeIdx == -1 {
-				text, buffer := splitTrailingPartialTag(content, thinkTagClose)
+				text, buffer := splitTrailingPartialTag(content, closeTag)
 				if text != "" {
 					emitThinking(text)
 				}
@@ -55,20 +70,22 @@ func consumeThinkTaggedStream(content string, ctx *transformer.StreamContext, em
 				emitThinking(content[:closeIdx])
 			}
 			ctx.InThinkingTag = false
-			content = content[closeIdx+len(thinkTagClose):]
+			ctx.ThinkingTagClose = ""
+			content = content[closeIdx+len(closeTag):]
 			continue
 		}
 
-		openIdx := strings.Index(content, thinkTagOpen)
+		openIdx, openTag, closeTag := findOpeningThinkTag(content)
 		if openIdx == -1 {
-			text, buffer := splitTrailingPartialTag(content, thinkTagOpen)
+			text, buffer := splitTrailingPartialOpeningThinkTag(content)
 			emitText(text)
 			ctx.ThinkingBuffer = buffer
 			return
 		}
 		emitText(content[:openIdx])
 		ctx.InThinkingTag = true
-		content = content[openIdx+len(thinkTagOpen):]
+		ctx.ThinkingTagClose = closeTag
+		content = content[openIdx+len(openTag):]
 	}
 }
 
@@ -82,7 +99,33 @@ func flushThinkTaggedStream(ctx *transformer.StreamContext, emitText func(string
 	}
 	ctx.InThinkingTag = false
 	ctx.ThinkingBuffer = ""
-	ctx.PendingThinkingText = ""
+	ctx.ThinkingTagClose = ""
+}
+
+func findOpeningThinkTag(s string) (int, string, string) {
+	bestIdx := -1
+	var bestOpen, bestClose string
+	for _, tags := range thinkTags {
+		idx := strings.Index(s, tags.open)
+		if idx != -1 && (bestIdx == -1 || idx < bestIdx) {
+			bestIdx = idx
+			bestOpen = tags.open
+			bestClose = tags.close
+		}
+	}
+	return bestIdx, bestOpen, bestClose
+}
+
+func splitTrailingPartialOpeningThinkTag(s string) (string, string) {
+	bestText, bestBuffer := s, ""
+	for _, tags := range thinkTags {
+		text, buffer := splitTrailingPartialTag(s, tags.open)
+		if len(buffer) > len(bestBuffer) {
+			bestText = text
+			bestBuffer = buffer
+		}
+	}
+	return bestText, bestBuffer
 }
 
 func makeThinkEmitters(ctx *transformer.StreamContext, result *[]byte) (func(string), func(string)) {

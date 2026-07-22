@@ -2,14 +2,145 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/lich0821/ccNexus/internal/config"
 	"github.com/lich0821/ccNexus/internal/logger"
+	"github.com/lich0821/ccNexus/internal/proxy"
 	"github.com/lich0821/ccNexus/internal/storage"
 )
+
+type endpointResponse struct {
+	ID          int64     `json:"id"`
+	Name        string    `json:"name"`
+	APIUrl      string    `json:"apiUrl"`
+	HasAPIKey   bool      `json:"hasApiKey"`
+	AuthMode    string    `json:"authMode"`
+	Enabled     bool      `json:"enabled"`
+	Transformer string    `json:"transformer"`
+	Model       string    `json:"model"`
+	Remark      string    `json:"remark"`
+	SortOrder   int       `json:"sortOrder"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+type createEndpointRequest struct {
+	Name        string `json:"name"`
+	APIUrl      string `json:"apiUrl"`
+	APIKey      string `json:"apiKey"`
+	AuthMode    string `json:"authMode"`
+	Enabled     bool   `json:"enabled"`
+	Transformer string `json:"transformer"`
+	Model       string `json:"model"`
+	Remark      string `json:"remark"`
+	CloneFrom   string `json:"cloneFrom"`
+}
+
+type updateEndpointRequest struct {
+	Name        string  `json:"name"`
+	APIUrl      string  `json:"apiUrl"`
+	APIKey      string  `json:"apiKey"`
+	ClearAPIKey bool    `json:"clearApiKey"`
+	AuthMode    string  `json:"authMode"`
+	Enabled     bool    `json:"enabled"`
+	Transformer string  `json:"transformer"`
+	Model       *string `json:"model"`
+	Remark      string  `json:"remark"`
+}
+
+func newEndpointResponse(endpoint storage.Endpoint) endpointResponse {
+	return endpointResponse{
+		ID:          endpoint.ID,
+		Name:        endpoint.Name,
+		APIUrl:      proxy.RedactURLSecrets(endpoint.APIUrl),
+		HasAPIKey:   strings.TrimSpace(endpoint.APIKey) != "",
+		AuthMode:    config.NormalizeAuthMode(endpoint.AuthMode),
+		Enabled:     endpoint.Enabled,
+		Transformer: endpoint.Transformer,
+		Model:       endpoint.Model,
+		Remark:      endpoint.Remark,
+		SortOrder:   endpoint.SortOrder,
+		CreatedAt:   endpoint.CreatedAt,
+		UpdatedAt:   endpoint.UpdatedAt,
+	}
+}
+
+func normalizeEndpointForSave(endpoint *storage.Endpoint, allowEmptyAPIKey bool) error {
+	normalized := config.Endpoint{
+		Name:        endpoint.Name,
+		APIUrl:      endpoint.APIUrl,
+		APIKey:      endpoint.APIKey,
+		AuthMode:    endpoint.AuthMode,
+		Enabled:     endpoint.Enabled,
+		Transformer: endpoint.Transformer,
+		Model:       endpoint.Model,
+		Remark:      endpoint.Remark,
+	}
+	if normalized.Transformer == "" {
+		normalized.Transformer = "claude"
+	}
+	config.ApplyEndpointAuthModeRules(&normalized)
+	normalized.APIUrl = normalizeAPIUrl(normalized.APIUrl)
+	if !isSupportedEndpointTransformer(normalized.Transformer) {
+		return fmt.Errorf("unsupported transformer: %s", normalized.Transformer)
+	}
+	if normalized.AuthMode == config.AuthModeAPIKey && strings.TrimSpace(normalized.APIKey) == "" && !allowEmptyAPIKey {
+		return fmt.Errorf("apiKey is required in api_key mode")
+	}
+
+	endpoint.APIUrl = normalized.APIUrl
+	endpoint.APIKey = normalized.APIKey
+	endpoint.AuthMode = normalized.AuthMode
+	endpoint.Transformer = normalized.Transformer
+	return nil
+}
+
+func isSupportedEndpointTransformer(transformer string) bool {
+	switch transformer {
+	case "claude", "openai", "openai2", "gemini":
+		return true
+	default:
+		return false
+	}
+}
+
+func mergeHiddenAPIURL(submitted, stored string) string {
+	submittedURL, submittedErr := url.Parse(strings.TrimSpace(submitted))
+	storedURL, storedErr := url.Parse(strings.TrimSpace(stored))
+	if submittedErr != nil || storedErr != nil || submittedURL == nil || storedURL == nil ||
+		!strings.EqualFold(submittedURL.Scheme, storedURL.Scheme) ||
+		!strings.EqualFold(submittedURL.Host, storedURL.Host) {
+		return submitted
+	}
+
+	if submittedURL.User == nil {
+		submittedURL.User = storedURL.User
+	}
+	query := submittedURL.Query()
+	storedQuery := storedURL.Query()
+	for key, values := range query {
+		storedValues := storedQuery[key]
+		for i, value := range values {
+			if value != "[REDACTED]" || len(storedValues) == 0 {
+				continue
+			}
+			if i < len(storedValues) {
+				values[i] = storedValues[i]
+			} else {
+				values[i] = storedValues[0]
+			}
+		}
+		query[key] = values
+	}
+	submittedURL.RawQuery = query.Encode()
+	return submittedURL.String()
+}
 
 // handleEndpoints handles GET (list) and POST (create) for endpoints
 func (h *Handler) handleEndpoints(w http.ResponseWriter, r *http.Request) {
@@ -25,27 +156,42 @@ func (h *Handler) handleEndpoints(w http.ResponseWriter, r *http.Request) {
 
 // handleEndpointByName handles GET, PUT, DELETE, PATCH for specific endpoint
 func (h *Handler) handleEndpointByName(w http.ResponseWriter, r *http.Request) {
-	// Extract endpoint name from path
-	path := strings.TrimPrefix(r.URL.Path, "/api/endpoints/")
+	// Split the escaped path first so encoded slashes remain part of the name.
+	path := strings.TrimPrefix(r.URL.EscapedPath(), "/api/endpoints/")
 	parts := strings.Split(path, "/")
 	if len(parts) == 0 || parts[0] == "" {
 		WriteError(w, http.StatusBadRequest, "Endpoint name required")
 		return
 	}
 
-	name := parts[0]
+	name, err := url.PathUnescape(parts[0])
+	if err != nil || strings.TrimSpace(name) == "" {
+		WriteError(w, http.StatusBadRequest, "Invalid endpoint name")
+		return
+	}
 
 	// Handle /test and /toggle sub-paths
 	if len(parts) > 1 {
 		switch parts[1] {
 		case "test":
+			if len(parts) != 2 {
+				http.NotFound(w, r)
+				return
+			}
 			h.testEndpoint(w, r, name)
 			return
 		case "toggle":
+			if len(parts) != 2 {
+				http.NotFound(w, r)
+				return
+			}
 			h.toggleEndpoint(w, r, name)
 			return
 		case "credentials":
 			h.handleEndpointCredentials(w, r, name, parts[2:])
+			return
+		default:
+			http.NotFound(w, r)
 			return
 		}
 	}
@@ -71,9 +217,9 @@ func (h *Handler) listEndpoints(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mask API keys
+	responseEndpoints := make([]endpointResponse, len(endpoints))
 	for i := range endpoints {
-		endpoints[i].APIKey = maskAPIKey(endpoints[i].APIKey)
+		responseEndpoints[i] = newEndpointResponse(endpoints[i])
 	}
 
 	tokenPools, err := h.storage.GetAllTokenPoolStats()
@@ -83,7 +229,7 @@ func (h *Handler) listEndpoints(w http.ResponseWriter, r *http.Request) {
 	}
 
 	WriteSuccess(w, map[string]interface{}{
-		"endpoints":  endpoints,
+		"endpoints":  responseEndpoints,
 		"tokenPools": tokenPools,
 	})
 }
@@ -99,8 +245,7 @@ func (h *Handler) getEndpoint(w http.ResponseWriter, r *http.Request, name strin
 
 	for _, ep := range endpoints {
 		if ep.Name == name {
-			ep.APIKey = maskAPIKey(ep.APIKey)
-			WriteSuccess(w, ep)
+			WriteSuccess(w, newEndpointResponse(ep))
 			return
 		}
 	}
@@ -110,65 +255,58 @@ func (h *Handler) getEndpoint(w http.ResponseWriter, r *http.Request, name strin
 
 // createEndpoint creates a new endpoint
 func (h *Handler) createEndpoint(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Name        string `json:"name"`
-		APIUrl      string `json:"apiUrl"`
-		APIKey      string `json:"apiKey"`
-		AuthMode    string `json:"authMode"`
-		Enabled     bool   `json:"enabled"`
-		Transformer string `json:"transformer"`
-		Model       string `json:"model"`
-		Remark      string `json:"remark"`
-		CloneFrom   string `json:"cloneFrom"` // Clone from existing endpoint name
-	}
+	var req createEndpointRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		WriteError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+	h.endpointMu.Lock()
+	defer h.endpointMu.Unlock()
 
-	// If cloning, get API key from source endpoint
-	if req.CloneFrom != "" && req.APIKey == "" {
+	// Preserve secrets that are intentionally omitted from the source endpoint response.
+	if req.CloneFrom != "" {
 		endpoints, err := h.storage.GetEndpoints()
 		if err == nil {
 			for _, ep := range endpoints {
 				if ep.Name == req.CloneFrom {
-					req.APIKey = ep.APIKey
+					if req.APIKey == "" {
+						req.APIKey = ep.APIKey
+					}
+					req.APIUrl = mergeHiddenAPIURL(req.APIUrl, ep.APIUrl)
 					break
 				}
 			}
 		}
 	}
 
-	authMode := config.NormalizeAuthMode(req.AuthMode)
-	normalizedEndpoint := config.Endpoint{
-		APIUrl:      normalizeAPIUrl(req.APIUrl),
+	endpoint := &storage.Endpoint{
+		Name:        strings.TrimSpace(req.Name),
+		APIUrl:      req.APIUrl,
 		APIKey:      req.APIKey,
-		AuthMode:    authMode,
+		AuthMode:    req.AuthMode,
+		Enabled:     req.Enabled,
 		Transformer: req.Transformer,
 		Model:       req.Model,
 		Remark:      req.Remark,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
 	}
-	if normalizedEndpoint.Transformer == "" {
-		normalizedEndpoint.Transformer = "claude"
+	if isReservedEndpointName(endpoint.Name) {
+		WriteError(w, http.StatusBadRequest, "Endpoint name is reserved")
+		return
 	}
-	config.ApplyEndpointAuthModeRules(&normalizedEndpoint)
-	authMode = normalizedEndpoint.AuthMode
-	req.APIUrl = normalizedEndpoint.APIUrl
-	req.APIKey = normalizedEndpoint.APIKey
-	req.Transformer = normalizedEndpoint.Transformer
-
-	// Validate required fields
-	if req.Name == "" || req.APIUrl == "" {
+	if endpoint.Name == "" || (strings.TrimSpace(endpoint.APIUrl) == "" && config.NormalizeAuthMode(endpoint.AuthMode) != config.AuthModeCodexTokenPool) {
 		WriteError(w, http.StatusBadRequest, "Name and apiUrl are required")
 		return
 	}
-	if authMode == config.AuthModeAPIKey && req.APIKey == "" {
-		WriteError(w, http.StatusBadRequest, "apiKey is required in api_key mode")
+	if err := normalizeEndpointForSave(endpoint, false); err != nil {
+		WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if config.IsTokenPoolAuthMode(authMode) {
-		req.APIKey = ""
+	if endpoint.APIUrl == "" {
+		WriteError(w, http.StatusBadRequest, "Name and apiUrl are required")
+		return
 	}
 
 	// Get current endpoints to determine sort order
@@ -181,26 +319,13 @@ func (h *Handler) createEndpoint(w http.ResponseWriter, r *http.Request) {
 
 	// Check if endpoint with same name exists
 	for _, ep := range endpoints {
-		if ep.Name == req.Name {
+		if ep.Name == endpoint.Name {
 			WriteError(w, http.StatusConflict, "Endpoint with this name already exists")
 			return
 		}
 	}
 
-	// Create new endpoint
-	endpoint := &storage.Endpoint{
-		Name:        req.Name,
-		APIUrl:      normalizeAPIUrl(req.APIUrl),
-		APIKey:      req.APIKey,
-		AuthMode:    authMode,
-		Enabled:     req.Enabled,
-		Transformer: req.Transformer,
-		Model:       req.Model,
-		Remark:      req.Remark,
-		SortOrder:   len(endpoints),
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
-	}
+	endpoint.SortOrder = len(endpoints)
 
 	if err := h.storage.SaveEndpoint(endpoint); err != nil {
 		logger.Error("Failed to save endpoint: %v", err)
@@ -213,27 +338,19 @@ func (h *Handler) createEndpoint(w http.ResponseWriter, r *http.Request) {
 		logger.Error("Failed to reload config: %v", err)
 	}
 
-	endpoint.APIKey = maskAPIKey(endpoint.APIKey)
-	WriteSuccess(w, endpoint)
+	WriteSuccess(w, newEndpointResponse(*endpoint))
 }
 
 // updateEndpoint updates an existing endpoint
 func (h *Handler) updateEndpoint(w http.ResponseWriter, r *http.Request, name string) {
-	var req struct {
-		Name        string `json:"name"`
-		APIUrl      string `json:"apiUrl"`
-		APIKey      string `json:"apiKey"`
-		AuthMode    string `json:"authMode"`
-		Enabled     bool   `json:"enabled"`
-		Transformer string `json:"transformer"`
-		Model       string `json:"model"`
-		Remark      string `json:"remark"`
-	}
+	var req updateEndpointRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		WriteError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+	h.endpointMu.Lock()
+	defer h.endpointMu.Unlock()
 
 	// Get existing endpoint
 	endpoints, err := h.storage.GetEndpoints()
@@ -257,54 +374,52 @@ func (h *Handler) updateEndpoint(w http.ResponseWriter, r *http.Request, name st
 	}
 
 	// Update fields
-	if req.Name != "" {
-		existing.Name = req.Name
+	if updatedName := strings.TrimSpace(req.Name); updatedName != "" {
+		if isReservedEndpointName(updatedName) {
+			WriteError(w, http.StatusBadRequest, "Endpoint name is reserved")
+			return
+		}
+		for _, endpoint := range endpoints {
+			if endpoint.Name == updatedName && endpoint.Name != name {
+				WriteError(w, http.StatusConflict, "Endpoint with this name already exists")
+				return
+			}
+		}
+		existing.Name = updatedName
 	}
 	if req.APIUrl != "" {
-		existing.APIUrl = normalizeAPIUrl(req.APIUrl)
+		existing.APIUrl = normalizeAPIUrl(mergeHiddenAPIURL(req.APIUrl, existing.APIUrl))
 	}
-	if req.APIKey != "" {
+	if req.ClearAPIKey {
+		existing.APIKey = ""
+	} else if req.APIKey != "" {
 		existing.APIKey = req.APIKey
 	}
 	if req.AuthMode != "" {
 		existing.AuthMode = config.NormalizeAuthMode(req.AuthMode)
 	}
-	if existing.AuthMode == "" {
-		existing.AuthMode = config.AuthModeAPIKey
-	}
-	normalizedEndpoint := config.Endpoint{
-		Name:        existing.Name,
-		APIUrl:      existing.APIUrl,
-		APIKey:      existing.APIKey,
-		AuthMode:    existing.AuthMode,
-		Enabled:     existing.Enabled,
-		Transformer: existing.Transformer,
-		Model:       existing.Model,
-		Remark:      existing.Remark,
-	}
-	if normalizedEndpoint.Transformer == "" {
-		normalizedEndpoint.Transformer = "claude"
-	}
-	config.ApplyEndpointAuthModeRules(&normalizedEndpoint)
-	existing.APIUrl = normalizedEndpoint.APIUrl
-	existing.APIKey = normalizedEndpoint.APIKey
-	existing.AuthMode = normalizedEndpoint.AuthMode
-	existing.Transformer = normalizedEndpoint.Transformer
-	if existing.AuthMode == config.AuthModeAPIKey && existing.APIKey == "" {
-		WriteError(w, http.StatusBadRequest, "apiKey is required in api_key mode")
-		return
-	}
 	existing.Enabled = req.Enabled
 	if req.Transformer != "" {
 		existing.Transformer = req.Transformer
 	}
-	if req.Model != "" {
-		existing.Model = req.Model
+	if req.Model != nil {
+		existing.Model = *req.Model
 	}
 	existing.Remark = req.Remark
+	if req.ClearAPIKey && existing.AuthMode == config.AuthModeAPIKey {
+		existing.Enabled = false
+	}
+	if err := normalizeEndpointForSave(existing, req.ClearAPIKey); err != nil {
+		WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	existing.UpdatedAt = time.Now()
 
-	if err := h.storage.UpdateEndpoint(existing); err != nil {
+	if err := h.storage.UpdateEndpointByName(name, existing); err != nil {
+		if errors.Is(err, storage.ErrEndpointNotFound) {
+			WriteError(w, http.StatusNotFound, "Endpoint not found")
+			return
+		}
 		logger.Error("Failed to update endpoint: %v", err)
 		WriteError(w, http.StatusInternalServerError, "Failed to update endpoint")
 		return
@@ -315,13 +430,19 @@ func (h *Handler) updateEndpoint(w http.ResponseWriter, r *http.Request, name st
 		logger.Error("Failed to reload config: %v", err)
 	}
 
-	existing.APIKey = maskAPIKey(existing.APIKey)
-	WriteSuccess(w, existing)
+	WriteSuccess(w, newEndpointResponse(*existing))
 }
 
 // deleteEndpoint deletes an endpoint
 func (h *Handler) deleteEndpoint(w http.ResponseWriter, r *http.Request, name string) {
+	h.endpointMu.Lock()
+	defer h.endpointMu.Unlock()
+
 	if err := h.storage.DeleteEndpoint(name); err != nil {
+		if errors.Is(err, storage.ErrEndpointNotFound) {
+			WriteError(w, http.StatusNotFound, "Endpoint not found")
+			return
+		}
 		logger.Error("Failed to delete endpoint: %v", err)
 		WriteError(w, http.StatusInternalServerError, "Failed to delete endpoint")
 		return
@@ -352,6 +473,8 @@ func (h *Handler) toggleEndpoint(w http.ResponseWriter, r *http.Request, name st
 		WriteError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+	h.endpointMu.Lock()
+	defer h.endpointMu.Unlock()
 
 	// Get existing endpoint
 	endpoints, err := h.storage.GetEndpoints()
@@ -371,6 +494,10 @@ func (h *Handler) toggleEndpoint(w http.ResponseWriter, r *http.Request, name st
 
 	if existing == nil {
 		WriteError(w, http.StatusNotFound, "Endpoint not found")
+		return
+	}
+	if req.Enabled && config.NormalizeAuthMode(existing.AuthMode) == config.AuthModeAPIKey && strings.TrimSpace(existing.APIKey) == "" {
+		WriteError(w, http.StatusBadRequest, "apiKey is required to enable this endpoint")
 		return
 	}
 
@@ -400,28 +527,14 @@ func (h *Handler) handleCurrentEndpoint(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	endpoints := h.config.GetEndpoints()
-	if len(endpoints) == 0 {
-		WriteError(w, http.StatusNotFound, "No endpoints configured")
-		return
-	}
-
-	// Get enabled endpoints
-	var enabledEndpoints []config.Endpoint
-	for _, ep := range endpoints {
-		if ep.Enabled {
-			enabledEndpoints = append(enabledEndpoints, ep)
-		}
-	}
-
-	if len(enabledEndpoints) == 0 {
+	name := h.proxy.GetCurrentEndpointName()
+	if name == "" {
 		WriteError(w, http.StatusNotFound, "No enabled endpoints")
 		return
 	}
 
-	// Return first enabled endpoint as current
 	WriteSuccess(w, map[string]interface{}{
-		"name": enabledEndpoints[0].Name,
+		"name": name,
 	})
 }
 
@@ -440,18 +553,10 @@ func (h *Handler) handleSwitchEndpoint(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+	h.endpointMu.Lock()
+	defer h.endpointMu.Unlock()
 
-	// Verify endpoint exists
-	endpoints := h.config.GetEndpoints()
-	found := false
-	for _, ep := range endpoints {
-		if ep.Name == req.Name && ep.Enabled {
-			found = true
-			break
-		}
-	}
-
-	if !found {
+	if err := h.proxy.SetCurrentEndpoint(req.Name); err != nil {
 		WriteError(w, http.StatusNotFound, "Endpoint not found or not enabled")
 		return
 	}
@@ -477,6 +582,8 @@ func (h *Handler) handleReorderEndpoints(w http.ResponseWriter, r *http.Request)
 		WriteError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+	h.endpointMu.Lock()
+	defer h.endpointMu.Unlock()
 
 	// Get all endpoints
 	endpoints, err := h.storage.GetEndpoints()
@@ -486,21 +593,31 @@ func (h *Handler) handleReorderEndpoints(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Create a map for quick lookup
-	endpointMap := make(map[string]*storage.Endpoint)
-	for i := range endpoints {
-		endpointMap[endpoints[i].Name] = &endpoints[i]
+	if len(req.Names) != len(endpoints) {
+		WriteError(w, http.StatusBadRequest, "Endpoint order must contain every endpoint exactly once")
+		return
+	}
+	existingNames := make(map[string]struct{}, len(endpoints))
+	for _, endpoint := range endpoints {
+		existingNames[endpoint.Name] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(req.Names))
+	for _, name := range req.Names {
+		if _, ok := existingNames[name]; !ok {
+			WriteError(w, http.StatusBadRequest, "Endpoint order contains an unknown endpoint")
+			return
+		}
+		if _, duplicate := seen[name]; duplicate {
+			WriteError(w, http.StatusBadRequest, "Endpoint order contains a duplicate endpoint")
+			return
+		}
+		seen[name] = struct{}{}
 	}
 
-	// Update sort order
-	for i, name := range req.Names {
-		if ep, ok := endpointMap[name]; ok {
-			ep.SortOrder = i
-			ep.UpdatedAt = time.Now()
-			if err := h.storage.UpdateEndpoint(ep); err != nil {
-				logger.Error("Failed to update endpoint sort order: %v", err)
-			}
-		}
+	if err := h.storage.ReorderEndpoints(req.Names); err != nil {
+		logger.Error("Failed to reorder endpoints: %v", err)
+		WriteError(w, http.StatusInternalServerError, "Failed to reorder endpoints")
+		return
 	}
 
 	// Update proxy config
@@ -516,27 +633,31 @@ func (h *Handler) handleReorderEndpoints(w http.ResponseWriter, r *http.Request)
 // reloadConfig reloads the configuration from storage and updates the proxy
 func (h *Handler) reloadConfig() error {
 	adapter := storage.NewConfigStorageAdapter(h.storage)
-	cfg, err := config.LoadFromStorage(adapter)
+	loaded, err := config.LoadFromStorage(adapter)
 	if err != nil {
 		return err
 	}
-
-	h.config = cfg
-	return h.proxy.UpdateConfig(cfg)
-}
-
-// maskAPIKey masks an API key, showing only the last 4 characters
-func maskAPIKey(key string) string {
-	if key == "" {
-		return ""
+	if err := h.proxy.UpdateConfig(loaded); err != nil {
+		return err
 	}
-	if len(key) <= 4 {
-		return "****"
-	}
-	return "****" + key[len(key)-4:]
+	h.config.UpdateEndpoints(loaded.GetEndpoints())
+	return nil
 }
 
 // normalizeAPIUrl ensures the API URL has the correct format
 func normalizeAPIUrl(apiUrl string) string {
-	return strings.TrimSuffix(apiUrl, "/")
+	apiUrl = strings.TrimSuffix(strings.TrimSpace(apiUrl), "/")
+	if apiUrl != "" && !strings.HasPrefix(apiUrl, "http://") && !strings.HasPrefix(apiUrl, "https://") {
+		apiUrl = "https://" + apiUrl
+	}
+	return apiUrl
+}
+
+func isReservedEndpointName(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "current", "switch", "reorder", "fetch-models":
+		return true
+	default:
+		return false
+	}
 }

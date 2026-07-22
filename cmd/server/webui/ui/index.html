@@ -1,14 +1,15 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ccNexus - Admin Dashboard</title>
+    <title>ccNexus</title>
     <link rel="stylesheet" href="/ui/css/main.css">
     <link rel="stylesheet" href="/ui/css/components.css">
     <link rel="stylesheet" href="/ui/css/themes.css">
 </head>
 <body>
+    <a class="skip-link" href="#content" data-i18n="common.skipToContent">跳到主要内容</a>
     <div id="app">
         <nav id="sidebar">
             <div class="sidebar-header">
@@ -17,32 +18,32 @@
             </div>
             <ul class="nav-menu">
                 <li><a href="#" data-view="dashboard" class="nav-link active">
-                    <span class="icon">📊</span>
+                    <span class="icon" aria-hidden="true">D</span>
                     <span class="nav-label" data-i18n="common.dashboard">Dashboard</span>
                 </a></li>
                 <li><a href="#" data-view="endpoints" class="nav-link">
-                    <span class="icon">🔗</span>
+                    <span class="icon" aria-hidden="true">E</span>
                     <span class="nav-label" data-i18n="common.endpoints">Endpoints</span>
                 </a></li>
                 <li><a href="#" data-view="stats" class="nav-link">
-                    <span class="icon">📈</span>
+                    <span class="icon" aria-hidden="true">S</span>
                     <span class="nav-label" data-i18n="common.statistics">Statistics</span>
                 </a></li>
                 <li><a href="#" data-view="testing" class="nav-link">
-                    <span class="icon">🧪</span>
+                    <span class="icon" aria-hidden="true">T</span>
                     <span class="nav-label" data-i18n="common.testing">Testing</span>
                 </a></li>
             </ul>
             <div class="sidebar-footer">
-                <button id="lang-toggle" class="btn-icon" title="切换语言 / Switch Language">
-                    <span class="icon">🌐</span>
+                <button id="lang-toggle" class="btn-icon" type="button" title="切换语言 / Switch Language" aria-label="切换语言 / Switch Language">
+                    <span class="icon" aria-hidden="true">中</span>
                 </button>
-                <button id="theme-toggle" class="btn-icon" title="切换主题 / Toggle theme">
-                    <span class="icon">🌙</span>
+                <button id="theme-toggle" class="btn-icon" type="button" title="切换主题 / Toggle theme" aria-label="切换主题 / Toggle theme">
+                    <span class="icon" aria-hidden="true">D</span>
                 </button>
             </div>
         </nav>
-        <main id="content">
+        <main id="content" tabindex="-1">
             <div id="view-container">
                 <!-- Dynamic content will be loaded here -->
             </div>
@@ -50,10 +51,10 @@
     </div>
 
     <!-- Modal container -->
-    <div id="modal-container"></div>
+    <div id="modal-container" aria-live="polite"></div>
 
     <!-- Toast notifications -->
-    <div id="toast-container"></div>
+    <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
     <!-- Chart.js from CDN -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>

@@ -38,7 +38,12 @@ export default {
         import: '导入',
         export: '导出',
         required: '必填',
-        optional: '可选'
+        optional: '可选',
+        skipToContent: '跳到主要内容',
+        switchToLightTheme: '切换到浅色主题',
+        switchToDarkTheme: '切换到深色主题',
+        pageTitle: 'ccNexus - 管理面板',
+        unknown: '未知'
     },
     dashboard: {
         title: '仪表板',
@@ -51,7 +56,10 @@ export default {
         recentActivity: '最近活动',
         requests: '请求数',
         noEndpoints: '未配置端点',
-        noEnabledEndpoints: '无启用端点'
+        noEnabledEndpoints: '无启用端点',
+        failedToLoad: '加载仪表板数据失败',
+        chartUnavailable: '图表暂不可用，统计表格仍可正常查看。',
+        noActivityData: '暂无活动数据。'
     },
     endpoints: {
         title: '端点管理',
@@ -73,18 +81,21 @@ export default {
         tokenPoolManagement: '令牌池管理',
         deleteEndpoint: '删除端点',
         cloneEndpoint: '克隆端点',
+        copySuffix: '（副本）',
         noEndpoints: '暂无端点',
         noEndpointsMessage: '添加您的第一个端点以开始使用',
         editEndpoint: '编辑端点',
-        addEndpoint: '添加端点',
-        cloneEndpoint: '克隆端点',
         remark: '备注',
         fetchModels: '获取模型',
         fetchModelsHint: '点击"获取模型"从 API 加载可用模型',
+        codexModelsUnavailable: 'Codex 令牌池端点不支持获取模型列表。',
+        apiKeyModeHint: '请求使用已保存的 API 密钥进行认证。',
+        tokenPoolModeHint: '保存端点后，可从令牌池管理凭证。',
+        codexTokenPoolModeHint: 'Codex 地址和 Responses 转换器由系统自动管理。',
         modelPlaceholder: 'gpt-4、gemini-pro 等',
         apiKeyPlaceholder: 'sk-...',
         apiUrlPlaceholder: 'https://api.example.com',
-        keepExistingKey: '保持为 **** 以保留现有密钥',
+        keepExistingKey: '留空可保留已保存的密钥',
         selectModel: '选择模型',
         noModelsFound: '未找到模型',
         testEndpoint: '测试端点',
@@ -99,7 +110,7 @@ export default {
         endpointCreated: '端点创建成功',
         endpointUpdated: '端点更新成功',
         endpointDeleted: '端点删除成功',
-        endpointCloned: '端点已克隆。请保存以创建新端点。',
+        endpointCloned: '端点克隆成功',
         endpointSwitched: '已切换到端点：',
         endpointEnabled: '端点已启用',
         endpointDisabled: '端点已禁用',
@@ -115,7 +126,7 @@ export default {
         failedToClone: '克隆失败',
         failedToCopy: '复制到剪贴板失败',
         urlCopied: 'URL 已复制',
-        enterApiUrlAndKey: '请先输入 API 地址和 API 密钥',
+        enterApiUrlAndKey: '请输入 API 地址和 API 密钥，或先保存端点',
         modelSelected: '已选择模型：',
         tokenPoolTitle: '令牌池：',
         total: '总计',
@@ -141,6 +152,7 @@ export default {
         credentialDisabled: '凭证已禁用',
         credentialActivated: '凭证已激活',
         tokenUpdated: '凭证令牌已更新',
+        noCredentialChanges: '凭证没有需要保存的更改。',
         credentialDeleted: '凭证已删除',
         failedToLoadTokenPool: '加载令牌池失败',
         failedToImport: '导入失败',
@@ -152,7 +164,34 @@ export default {
         confirmDeleteCredential: '确定要删除凭证 #{id} 吗？',
         pleasePasteJson: '请先粘贴凭证 JSON',
         invalidJson: '无效的 JSON',
-        failedToUpdateToken: '更新令牌失败'
+        failedToUpdateToken: '更新令牌失败',
+        reorder: '排序',
+        authMode: '认证模式',
+        apiKeyConfigured: '已配置 API 密钥',
+        apiKeyMissing: '未配置 API 密钥',
+        clearApiKey: '清除已保存的 API 密钥',
+        clearApiKeyTitle: '确认清除 API 密钥',
+        confirmClearApiKey: '保存后将删除已存储的 API 密钥，端点可能立即无法使用。确定继续吗？',
+        apiKeyRequired: '新建 API 密钥端点时必须填写 API 密钥。',
+        fetchingModels: '获取中...',
+        tokenPoolUnavailable: '令牌池仅适用于令牌池认证模式。',
+        updateCredential: '更新凭证令牌',
+        deleteCredential: '删除凭证',
+        tokens: '令牌',
+        accessToken: '访问令牌',
+        refreshToken: '刷新令牌',
+        idToken: 'ID 令牌',
+        keepExistingToken: '留空可保留已保存的令牌',
+        tokenConfigured: '已配置令牌',
+        tokenMissing: '未配置令牌',
+        clearRefreshToken: '清除已保存的刷新令牌',
+        clearIdToken: '清除已保存的 ID 令牌',
+        credentialNotFound: '凭证已不存在，请刷新后重试。'
+    },
+    errors: {
+        invalidJSONResponse: '服务器返回了无效的 JSON 响应',
+        requestFailed: '请求失败（{status}）',
+        networkError: '网络连接失败，请检查服务是否可用'
     },
     stats: {
         title: '统计',
@@ -173,6 +212,7 @@ export default {
     },
     testing: {
         title: '端点测试',
+        endpoint: '端点',
         selectEndpoint: '选择端点',
         runTest: '运行测试',
         loadingEndpoints: '加载中...',
@@ -192,7 +232,7 @@ export default {
         endpointCreated: '端点创建成功',
         endpointUpdated: '端点更新成功',
         endpointDeleted: '端点删除成功',
-        endpointCloned: '端点已克隆。请保存以创建新端点。',
+        endpointCloned: '端点克隆成功',
         endpointSwitched: '已切换到端点：',
         endpointEnabled: '端点已启用',
         endpointDisabled: '端点已禁用',
@@ -205,13 +245,19 @@ export default {
         credentialActivated: '凭证已激活',
         tokenUpdated: '凭证令牌已更新',
         credentialDeleted: '凭证已删除',
-        urlCopied: 'URL 已复制'
+        urlCopied: 'URL 已复制',
+        realtimeDisconnected: '实时连接已中断，正在自动重连',
+        realtimeRestored: '实时连接已恢复'
     },
     transformers: {
         claude: 'Claude',
         openai: 'OpenAI',
         openai2: 'OpenAI 响应',
-        gemini: 'Gemini',
-        deepseek: 'DeepSeek'
+        gemini: 'Gemini'
+    },
+    authModes: {
+        api_key: 'API 密钥',
+        token_pool: '令牌池',
+        codex_token_pool: 'Codex 令牌池'
     }
 };

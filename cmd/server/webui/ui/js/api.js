@@ -1,3 +1,5 @@
+import { t } from './utils/i18n.js';
+
 // API Client for ccNexus
 class APIClient {
     constructor(baseURL = '/api') {
@@ -18,15 +20,35 @@ class APIClient {
 
         try {
             const response = await fetch(`${this.baseURL}${path}`, options);
-            const result = await response.json();
+            const responseText = await response.text();
+            let result = null;
 
-            if (!response.ok) {
-                throw new Error(result.error || 'Request failed');
+            if (responseText.trim()) {
+                try {
+                    result = JSON.parse(responseText);
+                } catch {
+                    if (response.ok) {
+                        throw new Error(t('errors.invalidJSONResponse'));
+                    }
+                }
             }
 
-            return result.data || result;
+            if (!response.ok) {
+                const apiError = result?.error;
+                const message = (typeof apiError === 'string' ? apiError : apiError?.message) ||
+                    result?.message || responseText.trim() || t('errors.requestFailed').replace('{status}', response.status);
+                throw new Error(message);
+            }
+
+            if (result && Object.prototype.hasOwnProperty.call(result, 'data')) {
+                return result.data;
+            }
+            return result;
         } catch (error) {
             console.error(`API Error [${method} ${path}]:`, error);
+            if (error instanceof TypeError) {
+                throw new Error(t('errors.networkError'));
+            }
             throw error;
         }
     }
@@ -68,8 +90,8 @@ class APIClient {
         return this.request('POST', '/endpoints/switch', { name });
     }
 
-    async fetchModels(apiUrl, apiKey, transformer) {
-        return this.request('POST', '/endpoints/fetch-models', { apiUrl, apiKey, transformer });
+    async fetchModels({ apiUrl, apiKey, transformer, endpointName }) {
+        return this.request('POST', '/endpoints/fetch-models', { apiUrl, apiKey, transformer, endpointName });
     }
 
     async getEndpointCredentials(name) {

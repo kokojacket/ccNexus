@@ -19,17 +19,22 @@ class Router {
 
         // Update active nav link
         document.querySelectorAll('.nav-link').forEach(link => {
-            link.classList.remove('active');
-            if (link.dataset.view === viewName) {
-                link.classList.add('active');
+            const active = link.dataset.view === viewName;
+            link.classList.toggle('active', active);
+            if (active) {
+                link.setAttribute('aria-current', 'page');
+            } else {
+                link.removeAttribute('aria-current');
             }
         });
 
-        // Update state
-        state.update('currentView', viewName);
-
-        // Render view
         const component = this.routes.get(viewName);
+        if (this.currentView && this.currentView !== component) {
+            this.currentView.destroy?.();
+        }
+
+        // Update state and render view
+        state.update('currentView', viewName);
         this.currentView = component;
         component.render();
     }

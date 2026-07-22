@@ -5,6 +5,7 @@ import { dashboard } from './components/dashboard.js';
 import { endpoints } from './components/endpoints.js';
 import { stats } from './components/stats.js';
 import { testing } from './components/testing.js';
+import { notifications } from './utils/notifications.js';
 import zhCN from './i18n/zh-CN.js';
 import en from './i18n/en.js';
 
@@ -21,15 +22,24 @@ function initTheme() {
     themeToggle.addEventListener('click', () => {
         const isDark = document.body.classList.toggle('dark-theme');
         localStorage.setItem('theme', isDark ? 'dark' : 'light');
-        themeToggle.querySelector('.icon').textContent = isDark ? '☀️' : '🌙';
+        updateThemeToggle(themeToggle, isDark);
+        window.dispatchEvent(new Event('themeChanged'));
     });
 
-    // Set initial icon
-    themeToggle.querySelector('.icon').textContent = savedTheme === 'dark' ? '☀️' : '🌙';
+    updateThemeToggle(themeToggle, savedTheme === 'dark');
+}
+
+function updateThemeToggle(button, isDark) {
+    const label = t(isDark ? 'common.switchToLightTheme' : 'common.switchToDarkTheme');
+    button.querySelector('.icon').textContent = isDark ? 'L' : 'D';
+    button.title = label;
+    button.setAttribute('aria-label', label);
 }
 
 // Update sidebar translations
 function updateSidebarTranslations() {
+    document.title = t('common.pageTitle');
+
     // Update subtitle
     const subtitle = document.getElementById('sidebar-subtitle');
     if (subtitle) {
@@ -43,14 +53,23 @@ function updateSidebarTranslations() {
             el.textContent = t(key);
         }
     });
+
+    const skipLink = document.querySelector('.skip-link');
+    if (skipLink) {
+        skipLink.textContent = t('common.skipToContent');
+    }
+    const langToggle = document.getElementById('lang-toggle');
+    langToggle.title = t('common.toggleLanguage');
+    langToggle.setAttribute('aria-label', t('common.toggleLanguage'));
+    updateThemeToggle(document.getElementById('theme-toggle'), document.body.classList.contains('dark-theme'));
 }
 
 // Initialize language toggle
 function initLanguageToggle() {
     const langToggle = document.getElementById('lang-toggle');
     const langLabels = {
-        'zh-CN': '🇨🇳',
-        'en': '🇺🇸'
+        'zh-CN': '中',
+        'en': 'EN'
     };
 
     // 设置初始图标
@@ -63,17 +82,37 @@ function initLanguageToggle() {
         langToggle.querySelector('.icon').textContent = langLabels[newLang];
         // 更新侧边栏翻译
         updateSidebarTranslations();
-        // 重新加载当前视图
-        const currentView = state.get('currentView');
-        if (currentView) {
-            router.navigate(currentView);
-        }
     });
 }
 
 // Initialize real-time updates
+let eventSource = null;
+let realtimeDisconnected = false;
+let realtimeRefreshTimer = null;
+
+function scheduleRealtimeRefresh() {
+    const scheduledView = state.get('currentView');
+    if (!['dashboard', 'stats'].includes(scheduledView) || realtimeRefreshTimer !== null) {
+        return;
+    }
+    realtimeRefreshTimer = setTimeout(() => {
+        realtimeRefreshTimer = null;
+        if (state.get('currentView') !== scheduledView) {
+            return;
+        }
+        if (scheduledView === 'dashboard') {
+            dashboard.refreshRealtime();
+        } else {
+            stats.refreshRealtime();
+        }
+    }, 300);
+}
+
 function initRealtime() {
-    const eventSource = new EventSource('/api/events');
+    if (eventSource) {
+        eventSource.close();
+    }
+    eventSource = new EventSource('/api/events');
 
     eventSource.onmessage = (event) => {
         try {
@@ -82,25 +121,27 @@ function initRealtime() {
             if (data.type === 'stats') {
                 state.update('stats', data.stats);
                 state.update('currentEndpoint', data.currentEndpoint);
-
-                // Update dashboard if it's the current view
-                if (state.get('currentView') === 'dashboard') {
-                    // Dashboard will handle its own updates via state subscription
-                }
+                scheduleRealtimeRefresh();
             }
         } catch (error) {
             console.error('Failed to parse SSE event:', error);
         }
     };
 
+    eventSource.onopen = () => {
+        if (realtimeDisconnected) {
+            notifications.success(t('notifications.realtimeRestored'));
+            realtimeDisconnected = false;
+        }
+    };
+
     eventSource.onerror = (error) => {
         console.error('SSE connection error:', error);
-        // Attempt to reconnect after 5 seconds
-        setTimeout(() => {
-            if (eventSource.readyState === EventSource.CLOSED) {
-                initRealtime();
-            }
-        }, 5000);
+        if (!realtimeDisconnected) {
+            realtimeDisconnected = true;
+            notifications.warning(t('notifications.realtimeDisconnected'));
+        }
+        // EventSource reconnects automatically.
     };
 }
 
@@ -126,6 +167,11 @@ function init() {
 
     // Initialize real-time updates
     initRealtime();
+
+    window.addEventListener('beforeunload', () => {
+        clearTimeout(realtimeRefreshTimer);
+        eventSource?.close();
+    }, { once: true });
 
     console.log('ccNexus Admin initialized');
 }

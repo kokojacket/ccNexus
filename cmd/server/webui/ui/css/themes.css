@@ -1,43 +1,37 @@
 /* Dark theme */
 body.dark-theme {
+    color-scheme: dark;
     --primary-color: #60a5fa;
     --primary-hover: #3b82f6;
+    --on-primary: #111827;
+    --primary-soft: #172554;
     --success-color: #34d399;
+    --success-soft: #052e2b;
+    --success-text: #6ee7b7;
     --danger-color: #f87171;
+    --on-danger: #111827;
+    --danger-soft: #450a0a;
+    --danger-text: #fca5a5;
     --warning-color: #fbbf24;
+    --warning-soft: #422006;
+    --warning-text: #fcd34d;
+    --info-color: #5eead4;
+    --info-soft: #134e4a;
+    --info-text: #99f6e4;
     --bg-primary: #1f2937;
     --bg-secondary: #111827;
     --bg-tertiary: #374151;
+    --bg-hover: #273548;
     --text-primary: #f9fafb;
-    --text-secondary: #9ca3af;
-    --border-color: #374151;
+    --text-secondary: #cbd5e1;
+    --border-color: #4b5563;
+    --focus-ring: rgba(96, 165, 250, 0.32);
+    --code-bg: #0f172a;
+    --code-text: #cbd5e1;
     --shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.3);
     --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
 }
 
-/* Dark theme badge adjustments */
-body.dark-theme .badge-success {
-    background-color: #064e3b;
-    color: #6ee7b7;
-}
-
-body.dark-theme .badge-danger {
-    background-color: #7f1d1d;
-    color: #fca5a5;
-}
-
-body.dark-theme .badge-warning {
-    background-color: #78350f;
-    color: #fcd34d;
-}
-
-body.dark-theme .badge-info {
-    background-color: #1e3a8a;
-    color: #93c5fd;
-}
-
-/* Dark theme code block */
-body.dark-theme .code-block {
-    background-color: #0f172a;
-    color: #cbd5e1;
+body.dark-theme .badge-primary {
+    color: #bfdbfe;
 }

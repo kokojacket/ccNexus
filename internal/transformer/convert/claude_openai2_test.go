@@ -53,6 +53,87 @@ func TestOpenAI2RespToClaudeWithThinking(t *testing.T) {
 	}
 }
 
+func TestClaudeStreamToOpenAI2PreservesReasoningSummary(t *testing.T) {
+	tests := []struct {
+		name   string
+		chunks []string
+	}{
+		{
+			name: "native thinking block",
+			chunks: []string{
+				"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}",
+				"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Reason\"}}",
+				"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}",
+			},
+		},
+		{
+			name: "split thinking tags",
+			chunks: []string{
+				"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+				"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"<think\"}}",
+				"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ing>Reason</think\"}}",
+				"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ing>\"}}",
+				"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}",
+			},
+		},
+		{
+			name: "split think tags",
+			chunks: []string{
+				"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+				"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"<thi\"}}",
+				"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"nk>Reason</thi\"}}",
+				"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"nk>\"}}",
+				"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := transformer.NewStreamContext()
+			chunks := append([]string{
+				"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":3}}}",
+			}, tt.chunks...)
+			chunks = append(chunks, "event: message_stop\ndata: {\"type\":\"message_stop\"}")
+
+			var stream strings.Builder
+			for _, chunk := range chunks {
+				out, err := ClaudeStreamToOpenAI2([]byte(chunk), ctx)
+				if err != nil {
+					t.Fatalf("ClaudeStreamToOpenAI2 failed: %v", err)
+				}
+				stream.Write(out)
+			}
+
+			var reasoningDelta, reasoningDone, outputText string
+			for _, line := range strings.Split(stream.String(), "\n") {
+				if !strings.HasPrefix(line, "data: {") {
+					continue
+				}
+				var event map[string]interface{}
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
+					t.Fatalf("unmarshal transformed event failed: %v", err)
+				}
+				switch event["type"] {
+				case "response.reasoning_summary_text.delta":
+					reasoningDelta += event["delta"].(string)
+				case "response.reasoning_summary_text.done":
+					reasoningDone, _ = event["text"].(string)
+				case "response.output_text.delta":
+					outputText += event["delta"].(string)
+				}
+			}
+
+			if reasoningDelta != "Reason" || reasoningDone != "Reason" {
+				t.Fatalf("expected complete reasoning summary, got delta=%q done=%q\nstream=%s", reasoningDelta, reasoningDone, stream.String())
+			}
+			if outputText != "" {
+				t.Fatalf("thinking text leaked into visible output: %q\nstream=%s", outputText, stream.String())
+			}
+		})
+	}
+}
+
 func TestOpenAI2StreamToClaudeWithThinking(t *testing.T) {
 	ctx := transformer.NewStreamContext()
 	ctx.ModelName = "claude-3-sonnet-20240229"

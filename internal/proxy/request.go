@@ -169,9 +169,9 @@ func buildProxyRequest(r *http.Request, endpoint config.Endpoint, apiKey string,
 		proxyReq.Header.Set("Authorization", "Bearer "+apiKey)
 	case "cc_gemini", "cx_chat_gemini", "cx_resp_gemini":
 		q := proxyReq.URL.Query()
-		q.Set("key", apiKey)
 		q.Set("alt", "sse")
 		proxyReq.URL.RawQuery = q.Encode()
+		proxyReq.Header.Set("x-goog-api-key", apiKey)
 	default:
 		// Claude endpoints
 		proxyReq.Header.Set("x-api-key", apiKey)
@@ -182,12 +182,12 @@ func buildProxyRequest(r *http.Request, endpoint config.Endpoint, apiKey string,
 	if parsedBase, err := url.Parse(normalizedAPIUrl); err == nil && strings.TrimSpace(parsedBase.Host) != "" {
 		proxyReq.Header.Set("Host", parsedBase.Host)
 	}
-	applyCodexCredentialHeaders(proxyReq, credential, requestBody)
+	ApplyCodexCredentialHeaders(proxyReq, credential, requestBody)
 
 	return proxyReq, nil
 }
 
-func applyCodexCredentialHeaders(req *http.Request, credential *storage.EndpointCredential, payload []byte) {
+func ApplyCodexCredentialHeaders(req *http.Request, credential *storage.EndpointCredential, payload []byte) {
 	if req == nil || credential == nil {
 		return
 	}
@@ -334,7 +334,7 @@ func sendRequest(ctx context.Context, proxyReq *http.Request, httpClient *http.C
 
 		transport, err := CreateProxyTransport(proxyURL)
 		if err != nil {
-			logger.Warn("Failed to create proxy transport: %v, using direct connection", err)
+			logger.Warn("Failed to create proxy transport: %s, using direct connection", redactKnownSecrets(err.Error(), urlSecrets(proxyURL)...))
 			clientWithProxy.Transport = httpClient.Transport
 		} else {
 			clientWithProxy.Transport = transport

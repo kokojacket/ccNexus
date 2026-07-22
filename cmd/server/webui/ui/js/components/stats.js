@@ -1,11 +1,14 @@
 import { api } from '../api.js';
+import { state } from '../state.js';
 import { notifications } from '../utils/notifications.js';
-import { formatNumber, formatTokens } from '../utils/formatters.js';
+import { escapeHtml, formatNumber, formatTokens } from '../utils/formatters.js';
 import { t } from '../utils/i18n.js';
 
 class Stats {
     constructor() {
         this.container = document.getElementById('view-container');
+        this.period = 'daily';
+        this.requestVersion = 0;
         // 监听语言切换
         window.addEventListener('languageChanged', () => {
             if (state.get('currentView') === 'stats') {
@@ -17,34 +20,37 @@ class Stats {
     async render() {
         this.container.innerHTML = `
             <div class="stats">
-                <h1>${t('stats.title')}</h1>
-
-                <div class="flex gap-2 mt-3 mb-3">
-                    <button class="btn btn-sm btn-primary period-btn active" data-period="daily">${t('stats.daily')}</button>
-                    <button class="btn btn-sm btn-secondary period-btn" data-period="weekly">${t('stats.weekly')}</button>
-                    <button class="btn btn-sm btn-secondary period-btn" data-period="monthly">${t('stats.monthly')}</button>
+                <div class="page-header">
+                    <h1>${t('stats.title')}</h1>
+                    <div class="actions">
+                        <button class="btn btn-sm btn-primary period-btn active" type="button" data-period="daily" aria-pressed="true">${t('stats.daily')}</button>
+                        <button class="btn btn-sm btn-secondary period-btn" type="button" data-period="weekly" aria-pressed="false">${t('stats.weekly')}</button>
+                        <button class="btn btn-sm btn-secondary period-btn" type="button" data-period="monthly" aria-pressed="false">${t('stats.monthly')}</button>
+                    </div>
                 </div>
 
                 <div id="stats-content"></div>
             </div>
         `;
 
+        this.updatePeriodButtons();
         document.querySelectorAll('.period-btn').forEach(btn => {
             btn.addEventListener('click', () => {
-                document.querySelectorAll('.period-btn').forEach(b => {
-                    b.classList.remove('btn-primary', 'active');
-                    b.classList.add('btn-secondary');
-                });
-                btn.classList.remove('btn-secondary');
-                btn.classList.add('btn-primary', 'active');
+                this.period = btn.dataset.period;
+                this.updatePeriodButtons();
                 this.loadStats(btn.dataset.period);
             });
         });
 
-        await this.loadStats('daily');
+        await this.loadStats(this.period);
     }
 
-    async loadStats(period) {
+    async loadStats(period, showLoading = true) {
+        this.period = period;
+        const requestVersion = ++this.requestVersion;
+        if (showLoading) {
+            this.renderLoading();
+        }
         try {
             let data;
             switch (period) {
@@ -59,15 +65,58 @@ class Stats {
                     break;
             }
 
+            if (requestVersion !== this.requestVersion || state.get('currentView') !== 'stats') {
+                return;
+            }
             this.renderStats(data);
         } catch (error) {
-            notifications.error(`${t('stats.failedToLoad')}: ${error.message}`);
+            if (requestVersion === this.requestVersion && state.get('currentView') === 'stats') {
+                this.renderError(error.message);
+                notifications.error(`${t('stats.failedToLoad')}: ${error.message}`);
+            }
         }
+    }
+
+    async refreshRealtime() {
+        if (state.get('currentView') !== 'stats') {
+            return;
+        }
+        await this.loadStats(this.period, false);
+    }
+
+    updatePeriodButtons() {
+        document.querySelectorAll('.period-btn').forEach(button => {
+            const active = button.dataset.period === this.period;
+            button.classList.toggle('btn-primary', active);
+            button.classList.toggle('active', active);
+            button.classList.toggle('btn-secondary', !active);
+            button.setAttribute('aria-pressed', String(active));
+        });
+    }
+
+    renderLoading() {
+        const container = document.getElementById('stats-content');
+        if (!container) {
+            return;
+        }
+        container.innerHTML = `<div class="flex-center"><div class="spinner" aria-hidden="true"></div><span class="text-muted">${t('common.loading')}</span></div>`;
+    }
+
+    renderError(message) {
+        const container = document.getElementById('stats-content');
+        if (!container) {
+            return;
+        }
+        container.innerHTML = '<div class="inline-alert error" id="stats-error"></div>';
+        container.querySelector('#stats-error').textContent = `${t('stats.failedToLoad')}: ${message}`;
     }
 
     renderStats(data) {
         const stats = data.stats || {};
         const container = document.getElementById('stats-content');
+        if (!container) {
+            return;
+        }
 
         container.innerHTML = `
             <div class="grid grid-cols-4 mb-4">
@@ -108,7 +157,7 @@ class Stats {
         }
 
         return `
-            <div class="table-container">
+            <div class="table-container table-responsive">
                 <table class="table">
                     <thead>
                         <tr>
@@ -124,11 +173,11 @@ class Stats {
                             const ep = endpoints[name];
                             return `
                                 <tr>
-                                    <td><strong>${this.escapeHtml(name)}</strong></td>
-                                    <td>${formatNumber(ep.requests || 0)}</td>
-                                    <td>${formatNumber(ep.errors || 0)}</td>
-                                    <td>${formatTokens(ep.inputTokens || 0)}</td>
-                                    <td>${formatTokens(ep.outputTokens || 0)}</td>
+                                    <td data-label="${t('stats.endpoint')}"><strong>${escapeHtml(name)}</strong></td>
+                                    <td data-label="${t('stats.requests')}">${formatNumber(ep.requests || 0)}</td>
+                                    <td data-label="${t('stats.errors')}">${formatNumber(ep.errors || 0)}</td>
+                                    <td data-label="${t('stats.inputTokens')}">${formatTokens(ep.inputTokens || 0)}</td>
+                                    <td data-label="${t('stats.outputTokens')}">${formatTokens(ep.outputTokens || 0)}</td>
                                 </tr>
                             `;
                         }).join('')}
@@ -138,10 +187,8 @@ class Stats {
         `;
     }
 
-    escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
+    destroy() {
+        this.requestVersion++;
     }
 }
 
