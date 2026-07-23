@@ -74,8 +74,8 @@ class APIClient {
         return this.request('PATCH', `/endpoints/${encodeURIComponent(name)}/toggle`, { enabled });
     }
 
-    async testEndpoint(name) {
-        return this.request('POST', `/endpoints/${encodeURIComponent(name)}/test`);
+    async testEndpoint(name, model = '') {
+        return this.request('POST', `/endpoints/${encodeURIComponent(name)}/test`, { model });
     }
 
     async reorderEndpoints(names) {
@@ -154,6 +154,14 @@ class APIClient {
 
     async updateLogLevel(logLevel) {
         return this.request('PUT', '/config/log-level', { logLevel });
+    }
+
+    async getBasicAuth() {
+        return this.request('GET', '/config/basic-auth');
+    }
+
+    async updateBasicAuth(data) {
+        return this.request('PUT', '/config/basic-auth', data);
     }
 }
 

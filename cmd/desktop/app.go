@@ -414,7 +414,10 @@ func (a *App) SwitchToEndpoint(endpointName string) error {
 }
 func (a *App) TestEndpoint(index int) string      { return a.endpoint.TestEndpoint(index) }
 func (a *App) TestEndpointLight(index int) string { return a.endpoint.TestEndpointLight(index) }
-func (a *App) TestAllEndpointsZeroCost() string   { return a.endpoint.TestAllEndpointsZeroCost() }
+func (a *App) TestEndpointLightWithModel(index int, model string) string {
+	return a.endpoint.TestEndpointLightWithModel(index, model)
+}
+func (a *App) TestAllEndpointsZeroCost() string { return a.endpoint.TestAllEndpointsZeroCost() }
 func (a *App) FetchModels(apiUrl, apiKey, transformer string) string {
 	return a.endpoint.FetchModels(apiUrl, apiKey, transformer)
 }

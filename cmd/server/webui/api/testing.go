@@ -43,6 +43,17 @@ func (h *Handler) testEndpoint(w http.ResponseWriter, r *http.Request, name stri
 		return
 	}
 
+	var request struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil && err != io.EOF {
+		WriteError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if model := strings.TrimSpace(request.Model); model != "" {
+		endpoint.Model = model
+	}
+
 	// Test the endpoint
 	start := time.Now()
 	response, err := h.sendTestRequest(endpoint)

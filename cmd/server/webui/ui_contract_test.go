@@ -26,6 +26,60 @@ func requireUIAssetContains(t *testing.T, path string, values ...string) {
 	}
 }
 
+func TestWebUIUsesDesktopAppSinglePageShell(t *testing.T) {
+	index := readUIAsset(t, "ui/index.html")
+	for _, value := range []string{
+		`class="app-header"`,
+		`id="proxy-port"`,
+		`id="statistics-panel"`,
+		`id="endpoints-panel"`,
+		`class="app-footer"`,
+	} {
+		if !strings.Contains(index, value) {
+			t.Errorf("index.html must contain %q", value)
+		}
+	}
+	for _, value := range []string{`id="sidebar"`, `data-view="testing"`, "chart.umd.min.js"} {
+		if strings.Contains(index, value) {
+			t.Errorf("index.html must not contain legacy navigation or unsupported asset %q", value)
+		}
+	}
+}
+
+func TestEndpointUIUsesDesktopAppCardControls(t *testing.T) {
+	requireUIAssetContains(t, "ui/js/components/endpoints.js",
+		"endpoint-card-grid",
+		"endpoint-card-compact",
+		"endpoint-collapse-btn",
+		"endpoint-view-btn",
+		"endpoint-filter-transformer",
+		"endpoint-filter-availability",
+		"endpoint-filter-enabled",
+	)
+}
+
+func TestEndpointTestUsesTemporaryModelPrompt(t *testing.T) {
+	content := readUIAsset(t, "ui/js/components/endpoints.js")
+	for _, value := range []string{
+		"requestTestModel",
+		"await api.testEndpoint(name, testModel)",
+		"input.value = configuredModel;",
+		"test-model-fetch",
+		"endpointName: endpoint.name",
+	} {
+		if !strings.Contains(content, value) {
+			t.Errorf("ui/js/components/endpoints.js must contain %q", value)
+		}
+	}
+	if strings.Contains(content, "return Promise.resolve(configuredModel)") {
+		t.Error("WebUI test flow must always open the model prompt")
+	}
+	requireUIAssetContains(t, "ui/js/api.js",
+		"testEndpoint(name, model",
+		"/test`, { model })",
+	)
+}
+
 func TestEndpointUIHasScopedActionsAndAccessibleReordering(t *testing.T) {
 	requireUIAssetContains(t, "ui/js/components/endpoints.js",
 		"this.actionVersion",
@@ -47,6 +101,18 @@ func TestEndpointAuthModesDriveFieldsAndCapabilities(t *testing.T) {
 		"endpoints.codexTokenPoolModeHint",
 		"endpoints.codexModelsUnavailable",
 	)
+}
+
+func TestEndpointAPIKeyIsPrefilledInPlaintext(t *testing.T) {
+	content := readUIAsset(t, "ui/js/components/endpoints.js")
+	for _, value := range []string{
+		`type="text" class="form-input" id="endpoint-api-key"`,
+		`value="${endpoint ? escapeHtml(endpoint.apiKey || '') : ''}"`,
+	} {
+		if !strings.Contains(content, value) {
+			t.Errorf("endpoints.js must contain %q", value)
+		}
+	}
 }
 
 func TestEndpointMutationsConvergeAndCloneReportsAfterSave(t *testing.T) {
@@ -84,55 +150,49 @@ func TestEndpointMutationsConvergeAndCloneReportsAfterSave(t *testing.T) {
 	}
 }
 
-func TestTestingAndStatsDiscardStaleResponses(t *testing.T) {
-	requireUIAssetContains(t, "ui/js/components/testing.js",
-		"this.requestVersion",
-		"this.lastResult",
-		"testing.endpoint",
-		"message || t(success ? 'testing.noResponse' : 'testing.unknownError')",
-	)
+func TestStatsDiscardStaleResponses(t *testing.T) {
 	requireUIAssetContains(t, "ui/js/components/stats.js",
+		"this.requestVersion",
+		"requestVersion !== this.requestVersion",
 		"aria-pressed",
 		"renderLoading",
 		"renderError",
 	)
 }
 
-func TestDashboardDiscardsOlderRealtimeResponse(t *testing.T) {
+func TestSinglePageRealtimeRefreshUsesStatsComponent(t *testing.T) {
 	workingDir, err := filepath.Abs(".")
 	if err != nil {
 		t.Fatalf("resolve package directory: %v", err)
 	}
 	script := `
 import { pathToFileURL } from 'node:url';
-globalThis.document = { getElementById() { return null; } };
+const elements = new Map();
+globalThis.document = { getElementById(id) { return elements.get(id) || null; } };
 globalThis.window = { addEventListener() {} };
-const dashboardModule = await import(pathToFileURL(process.argv[1]));
+const statsModule = await import(pathToFileURL(process.argv[1]));
 const apiModule = await import(pathToFileURL(process.argv[2]));
-const stateModule = await import(pathToFileURL(process.argv[3]));
 const pending = [];
-const rendered = [];
 apiModule.api.getStatsDaily = () => new Promise(resolve => pending.push(resolve));
-dashboardModule.dashboard.renderChart = value => rendered.push(value.marker);
-stateModule.state.update('currentView', 'dashboard');
-const older = dashboardModule.dashboard.refreshRealtime();
-const newer = dashboardModule.dashboard.refreshRealtime();
-pending[1]({ marker: 'newer' });
+apiModule.api.getEndpoints = async () => ({ endpoints: [] });
+statsModule.stats.renderStats = value => { statsModule.stats.lastRendered = value.marker; };
+const older = statsModule.stats.refreshRealtime();
+const newer = statsModule.stats.refreshRealtime();
+pending[1]({ marker: 'newer', stats: {} });
 await newer;
-pending[0]({ marker: 'older' });
+pending[0]({ marker: 'older', stats: {} });
 await older;
-if (dashboardModule.dashboard.dailyStats?.marker !== 'newer' || rendered.join(',') !== 'newer') {
-  throw new Error(JSON.stringify({ final: dashboardModule.dashboard.dailyStats, rendered }));
+if (statsModule.stats.lastRendered !== 'newer') {
+  throw new Error(JSON.stringify({ rendered: statsModule.stats.lastRendered }));
 }
 `
 	cmd := exec.Command(
 		"node", "--input-type=module", "-e", script,
-		filepath.Join(workingDir, "ui/js/components/dashboard.js"),
+		filepath.Join(workingDir, "ui/js/components/stats.js"),
 		filepath.Join(workingDir, "ui/js/api.js"),
-		filepath.Join(workingDir, "ui/js/state.js"),
 	)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("dashboard stale-response harness failed: %v\n%s", err, output)
+		t.Fatalf("stats stale-response harness failed: %v\n%s", err, output)
 	}
 }
 
@@ -141,18 +201,14 @@ func TestModalNavigationAndThemeAccessibilityContracts(t *testing.T) {
 		"inert = true",
 		"removeAttribute('aria-hidden')",
 	)
-	requireUIAssetContains(t, "ui/js/router.js", "aria-current")
 	requireUIAssetContains(t, "ui/js/main.js",
 		"themeChanged",
 		"document.title =",
+		"closeAllModals()",
+		"activateModal(overlay",
 	)
-	requireUIAssetContains(t, "ui/js/components/dashboard.js",
-		"themeChanged",
-		"TotalSuccess",
-		"--text-secondary",
-	)
-	requireUIAssetContains(t, "ui/css/main.css", "--on-primary")
-	requireUIAssetContains(t, "ui/css/components.css", "max-width: 820px")
+	requireUIAssetContains(t, "ui/css/main.css", "--bg-gradient-start", "prefers-reduced-motion")
+	requireUIAssetContains(t, "ui/css/components.css", ".modal--wide", ".endpoint-card-grid")
 }
 
 func TestFrontendFallbackErrorsAreLocalized(t *testing.T) {
@@ -163,6 +219,29 @@ func TestFrontendFallbackErrorsAreLocalized(t *testing.T) {
 	)
 }
 
+func TestEndpointStatusLabelsDoNotUseNotificationPunctuation(t *testing.T) {
+	workingDir, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("resolve package directory: %v", err)
+	}
+	script := `
+import { pathToFileURL } from 'node:url';
+const en = (await import(pathToFileURL(process.argv[1]))).default;
+const zh = (await import(pathToFileURL(process.argv[2]))).default;
+if (en.endpoints.testFailed !== 'Test failed' || zh.endpoints.testFailed !== '测试失败') {
+  throw new Error(JSON.stringify({ en: en.endpoints.testFailed, zh: zh.endpoints.testFailed }));
+}
+`
+	cmd := exec.Command(
+		"node", "--input-type=module", "-e", script,
+		filepath.Join(workingDir, "ui/js/i18n/en.js"),
+		filepath.Join(workingDir, "ui/js/i18n/zh-CN.js"),
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("endpoint status translation harness failed: %v\n%s", err, output)
+	}
+}
+
 func TestRealtimeRefreshIsCoalescedAndNetworkErrorsAreLocalized(t *testing.T) {
 	requireUIAssetContains(t, "ui/js/main.js",
 		"let realtimeDisconnected = false",
@@ -171,28 +250,12 @@ func TestRealtimeRefreshIsCoalescedAndNetworkErrorsAreLocalized(t *testing.T) {
 		"notifications.warning(t('notifications.realtimeDisconnected'))",
 		"notifications.success(t('notifications.realtimeRestored'))",
 		"clearTimeout(realtimeRefreshTimer)",
-		"dashboard.refreshRealtime()",
 		"stats.refreshRealtime()",
 		"state.update('currentEndpoint'",
 	)
 
-	dashboard := readUIAsset(t, "ui/js/components/dashboard.js")
-	refreshStart := strings.Index(dashboard, "async refreshRealtime()")
-	refreshEnd := strings.Index(dashboard, "\n    updateStats(")
-	if refreshStart < 0 || refreshEnd < refreshStart {
-		t.Fatal("dashboard realtime refresh block not found")
-	}
-	dashboardRefresh := dashboard[refreshStart:refreshEnd]
-	if strings.Count(dashboardRefresh, "api.") != 1 || !strings.Contains(dashboardRefresh, "api.getStatsDaily()") {
-		t.Error("dashboard realtime refresh must issue only the daily activity request")
-	}
-	if !strings.Contains(dashboardRefresh, "state.get('currentView') !== 'dashboard'") {
-		t.Error("dashboard realtime refresh must skip work when hidden")
-	}
-
 	requireUIAssetContains(t, "ui/js/components/stats.js",
 		"async refreshRealtime()",
-		"state.get('currentView') !== 'stats'",
 		"this.loadStats(this.period, false)",
 	)
 	requireUIAssetContains(t, "ui/js/api.js",
@@ -212,13 +275,12 @@ func TestRealtimeRefreshIsCoalescedAndNetworkErrorsAreLocalized(t *testing.T) {
 }
 
 func TestThemeModalAndMobileTableRegressions(t *testing.T) {
-	dashboard := readUIAsset(t, "ui/js/components/dashboard.js")
-	if strings.Count(dashboard, "this.dailyStats = null") < 2 {
-		t.Error("dashboard must clear cached chart data when its page lifecycle resets")
-	}
 	modal := readUIAsset(t, "ui/js/utils/modal.js")
 	if strings.Contains(modal, "queueMicrotask") {
 		t.Error("modal focus must move before the previous layer becomes hidden")
+	}
+	if !strings.Contains(modal, "preferredTarget?.matches(focusableSelector)") {
+		t.Error("disabled or hidden initial focus targets must fall back to a focusable modal control")
 	}
 	focusIndex := strings.LastIndex(modal, "(target || dialog).focus();")
 	syncIndex := strings.LastIndex(modal, "syncModalStack();")
@@ -226,7 +288,14 @@ func TestThemeModalAndMobileTableRegressions(t *testing.T) {
 		t.Error("new modal must receive focus before lower modal layers become hidden")
 	}
 	requireUIAssetContains(t, "ui/css/components.css",
-		".inline-alert.error {\n    border-color: var(--danger-color);\n    background: var(--danger-soft);\n    color: var(--danger-text);",
-		".table td[colspan]",
+		".inline-alert.error",
+		".endpoint-card-actions",
+		"@media (max-width: 700px)",
 	)
+	components := readUIAsset(t, "ui/css/components.css")
+	buttonStart := strings.Index(components, ".endpoint-section-header > .btn {")
+	buttonEnd := strings.Index(components[buttonStart:], "}")
+	if buttonStart < 0 || buttonEnd < 0 || !strings.Contains(components[buttonStart:buttonStart+buttonEnd], "white-space: nowrap") {
+		t.Error("the endpoint primary action must remain on one line at tablet widths")
+	}
 }

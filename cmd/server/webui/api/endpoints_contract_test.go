@@ -38,7 +38,7 @@ func saveEndpointForTest(t *testing.T, h *Handler, endpoint storage.Endpoint) {
 	}
 }
 
-func TestListEndpointsReturnsHasAPIKeyWithoutAPIKey(t *testing.T) {
+func TestListEndpointsReturnsAPIKeyInPlaintext(t *testing.T) {
 	h := newEndpointTestHandler(t)
 	saveEndpointForTest(t, h, storage.Endpoint{
 		Name:        "saved",
@@ -63,8 +63,8 @@ func TestListEndpointsReturnsHasAPIKeyWithoutAPIKey(t *testing.T) {
 		t.Fatalf("expected one endpoint, got %d", len(response.Data.Endpoints))
 	}
 	endpoint := response.Data.Endpoints[0]
-	if _, exists := endpoint["apiKey"]; exists {
-		t.Fatalf("response must not contain apiKey: %s", rec.Body.String())
+	if apiKey, _ := endpoint["apiKey"].(string); apiKey != "top-secret" {
+		t.Fatalf("expected plaintext apiKey, got %q: %s", apiKey, rec.Body.String())
 	}
 	if hasAPIKey, _ := endpoint["hasApiKey"].(bool); !hasAPIKey {
 		t.Fatalf("expected hasApiKey=true: %s", rec.Body.String())
@@ -687,6 +687,39 @@ func TestSendTestRequestRequiresConfiguredModel(t *testing.T) {
 	}
 	if requests != 0 {
 		t.Fatalf("missing model must not send an upstream request, got %d", requests)
+	}
+}
+
+func TestEndpointTestUsesTemporaryModelWithoutSaving(t *testing.T) {
+	models := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		models <- body["model"].(string)
+		_, _ = w.Write([]byte(`{"content":[{"text":"ok"}]}`))
+	}))
+	defer upstream.Close()
+
+	h := newEndpointTestHandler(t)
+	saveEndpointForTest(t, h, storage.Endpoint{
+		Name: "temporary-model", APIUrl: upstream.URL, APIKey: "secret",
+		AuthMode: config.AuthModeAPIKey, Transformer: "claude",
+	})
+
+	rec := httptest.NewRecorder()
+	h.testEndpoint(rec, httptest.NewRequest(http.MethodPost, "/api/endpoints/temporary-model/test", strings.NewReader(`{"model":"claude-test-only"}`)), "temporary-model")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"success":true`) {
+		t.Fatalf("temporary-model test failed: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := <-models; got != "claude-test-only" {
+		t.Fatalf("test model=%q, want claude-test-only", got)
+	}
+	endpoints, err := h.storage.GetEndpoints()
+	if err != nil || len(endpoints) != 1 {
+		t.Fatalf("reload endpoints: count=%d err=%v", len(endpoints), err)
+	}
+	if endpoints[0].Model != "" {
+		t.Fatalf("temporary test model was persisted: %q", endpoints[0].Model)
 	}
 }
 

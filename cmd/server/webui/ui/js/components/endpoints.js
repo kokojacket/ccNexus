@@ -9,7 +9,7 @@ const tokenPoolAuthModes = new Set(['token_pool', 'codex_token_pool']);
 
 class Endpoints {
     constructor() {
-        this.container = document.getElementById('view-container');
+        this.container = document.getElementById('endpoints-panel');
         this.endpoints = [];
         this.tokenPools = {};
         this.currentEndpoint = null;
@@ -20,6 +20,9 @@ class Endpoints {
         this.mutationVersion = 0;
         this.mutationQueue = Promise.resolve();
         this.reorderQueue = Promise.resolve();
+        this.viewMode = localStorage.getItem('ccNexus_endpointViewMode') === 'compact' ? 'compact' : 'detail';
+        this.collapsed = false;
+        this.filters = { transformer: '', availability: '', enabled: '' };
         state.subscribe('currentEndpoint', currentEndpoint => {
             if (state.get('currentView') === 'endpoints' && currentEndpoint !== this.currentEndpoint) {
                 this.currentEndpoint = currentEndpoint;
@@ -39,25 +42,86 @@ class Endpoints {
         const renderVersion = ++this.renderVersion;
         this.invalidateActions();
         this.container.innerHTML = `
-            <div class="endpoints">
-                <div class="page-header">
-                    <h1>${t('endpoints.title')}</h1>
-                    <button class="btn btn-primary" id="add-endpoint-btn" type="button">
-                        <span>+ ${t('endpoints.addEndpoint')}</span>
+            <div class="section-header endpoint-section-header">
+                <div class="endpoint-heading-tools">
+                    <h2><span aria-hidden="true">🔗</span> ${t('endpoints.title')}</h2>
+                    <button class="endpoint-collapse-btn" id="endpoint-collapse-btn" type="button" aria-expanded="${!this.collapsed}">
+                        <span aria-hidden="true">${this.collapsed ? '▼' : '▲'}</span>
+                        <span>${t(this.collapsed ? 'endpoints.expand' : 'endpoints.collapse')}</span>
                     </button>
-                </div>
-
-                <div class="card">
-                    <div class="card-body">
-                        <div id="endpoints-table"></div>
+                    <div class="endpoint-view-tabs" role="group" aria-label="${t('endpoints.viewMode')}">
+                        <button class="endpoint-view-btn ${this.viewMode === 'detail' ? 'active' : ''}" type="button" data-mode="detail" aria-pressed="${this.viewMode === 'detail'}" title="${t('endpoints.detailView')}">▦</button>
+                        <button class="endpoint-view-btn ${this.viewMode === 'compact' ? 'active' : ''}" type="button" data-mode="compact" aria-pressed="${this.viewMode === 'compact'}" title="${t('endpoints.compactView')}">☰</button>
+                    </div>
+                    <div class="endpoint-filters" aria-label="${t('endpoints.filters')}">
+                        <select class="filter-select" id="endpoint-filter-transformer" aria-label="${t('endpoints.filterTransformer')}">
+                            <option value="">${t('endpoints.allTransformers')}</option>
+                            <option value="claude">Claude</option>
+                            <option value="openai">OpenAI</option>
+                            <option value="openai2">OpenAI2</option>
+                            <option value="gemini">Gemini</option>
+                        </select>
+                        <select class="filter-select" id="endpoint-filter-availability" aria-label="${t('endpoints.filterAvailability')}">
+                            <option value="">${t('endpoints.allAvailability')}</option>
+                            <option value="available">${t('endpoints.available')}</option>
+                            <option value="unknown">${t('endpoints.unknownAvailability')}</option>
+                            <option value="unavailable">${t('endpoints.unavailable')}</option>
+                        </select>
+                        <select class="filter-select" id="endpoint-filter-enabled" aria-label="${t('endpoints.filterEnabled')}">
+                            <option value="">${t('endpoints.allEnabledStates')}</option>
+                            <option value="enabled">${t('common.enabled')}</option>
+                            <option value="disabled">${t('common.disabled')}</option>
+                        </select>
                     </div>
                 </div>
+                <button class="btn btn-primary" id="add-endpoint-btn" type="button">+ ${t('endpoints.addEndpoint')}</button>
             </div>
-        `;
+            <div class="filter-active-banner" id="endpoint-filter-banner" hidden>
+                <span>${t('endpoints.filterActive')}</span>
+                <button class="btn-link" id="clear-endpoint-filters" type="button">${t('endpoints.clearFilters')}</button>
+            </div>
+            <div id="endpoints-content" ${this.collapsed ? 'hidden' : ''}>
+                <div id="endpoints-table"></div>
+            </div>`;
 
-        document.getElementById('add-endpoint-btn').addEventListener('click', () => this.showAddModal());
+        this.bindWorkspaceControls();
 
         await this.loadEndpoints(renderVersion);
+    }
+
+    bindWorkspaceControls() {
+        document.getElementById('add-endpoint-btn').addEventListener('click', () => this.showAddModal());
+        document.getElementById('endpoint-collapse-btn').addEventListener('click', () => {
+            this.collapsed = !this.collapsed;
+            this.render();
+        });
+        document.querySelectorAll('.endpoint-view-btn').forEach(button => {
+            button.addEventListener('click', () => {
+                this.viewMode = button.dataset.mode;
+                localStorage.setItem('ccNexus_endpointViewMode', this.viewMode);
+                document.querySelectorAll('.endpoint-view-btn').forEach(viewButton => {
+                    const active = viewButton.dataset.mode === this.viewMode;
+                    viewButton.classList.toggle('active', active);
+                    viewButton.setAttribute('aria-pressed', String(active));
+                });
+                this.renderTable();
+            });
+        });
+        for (const key of Object.keys(this.filters)) {
+            const select = document.getElementById(`endpoint-filter-${key}`);
+            select.value = this.filters[key];
+            select.addEventListener('change', () => {
+                this.filters[key] = select.value;
+                this.renderTable();
+            });
+        }
+        document.getElementById('clear-endpoint-filters').addEventListener('click', () => {
+            this.filters = { transformer: '', availability: '', enabled: '' };
+            for (const key of Object.keys(this.filters)) {
+                document.getElementById(`endpoint-filter-${key}`).value = '';
+            }
+            this.renderTable();
+        });
     }
 
     beginAction() {
@@ -144,6 +208,9 @@ class Endpoints {
             return;
         }
 
+        const visibleEndpoints = this.getVisibleEndpoints();
+        document.getElementById('endpoint-filter-banner').hidden = !this.isFilterActive();
+
         if (this.endpoints.length === 0) {
             container.innerHTML = `
                 <div class="empty-state">
@@ -155,32 +222,36 @@ class Endpoints {
             return;
         }
 
+        if (visibleEndpoints.length === 0) {
+            container.innerHTML = `<div class="empty-state compact"><div class="empty-state-title">${t('endpoints.noFilterResults')}</div><button class="btn btn-secondary" id="empty-clear-filters" type="button">${t('endpoints.clearFilters')}</button></div>`;
+            document.getElementById('empty-clear-filters').addEventListener('click', () => document.getElementById('clear-endpoint-filters').click());
+            return;
+        }
+
         container.innerHTML = `
-            <div class="table-container table-responsive">
-                <table class="table">
-                    <thead>
-                        <tr>
-                            <th class="reorder-column" aria-label="${t('endpoints.reorder')}"></th>
-                            <th>${t('common.name')}</th>
-                            <th>${t('endpoints.apiUrl')}</th>
-                            <th>${t('endpoints.authMode')}</th>
-                            <th>${t('endpoints.transformer')}</th>
-                            <th>${t('endpoints.model')}</th>
-                            <th>${t('endpoints.tokenPool')}</th>
-                            <th>${t('common.status')}</th>
-                            <th>${t('common.actions')}</th>
-                        </tr>
-                    </thead>
-                    <tbody id="endpoints-tbody">
-                        ${this.endpoints.map((ep, index) => this.renderEndpointRow(ep, index)).join('')}
-                    </tbody>
-                </table>
+            <div class="endpoint-card-grid ${this.viewMode === 'compact' ? 'endpoint-card-compact' : 'endpoint-card-detail'}">
+                ${visibleEndpoints.map(item => this.renderEndpointRow(item.endpoint, item.index)).join('')}
             </div>
         `;
 
         // Attach event listeners
         this.attachEventListeners();
         this.attachDragListeners();
+    }
+
+    isFilterActive() {
+        return Object.values(this.filters).some(Boolean);
+    }
+
+    getVisibleEndpoints() {
+        return this.endpoints.map((endpoint, index) => ({ endpoint, index })).filter(({ endpoint }) => {
+            const testStatus = this.getTestStatus(endpoint.name);
+            const availability = testStatus === true ? 'available' : testStatus === false ? 'unavailable' : 'unknown';
+            const enabled = endpoint.enabled ? 'enabled' : 'disabled';
+            return (!this.filters.transformer || endpoint.transformer === this.filters.transformer) &&
+                (!this.filters.availability || availability === this.filters.availability) &&
+                (!this.filters.enabled || enabled === this.filters.enabled);
+        });
     }
 
     renderEndpointRow(ep, index) {
@@ -199,64 +270,50 @@ class Endpoints {
             testStatusLabel = t('endpoints.testFailed');
         }
 
+        const reorderDisabled = this.isFilterActive();
         return `
-            <tr class="endpoint-row" data-endpoint="${escapeHtml(ep.name)}" data-index="${index}" draggable="true">
-                <td class="drag-handle" data-label="${t('endpoints.reorder')}">
-                    <div class="actions">
-                        <button class="btn btn-sm btn-secondary move-up-btn" type="button" draggable="false" data-index="${index}" title="${reorderLabel} ↑" aria-label="${reorderLabel} ↑" ${index === 0 ? 'disabled' : ''}>↑</button>
-                        <button class="btn btn-sm btn-secondary move-down-btn" type="button" draggable="false" data-index="${index}" title="${reorderLabel} ↓" aria-label="${reorderLabel} ↓" ${index === this.endpoints.length - 1 ? 'disabled' : ''}>↓</button>
-                        <span aria-hidden="true">⋮⋮</span>
+            <article class="endpoint-card ${isCurrentEndpoint ? 'is-current' : ''}" data-endpoint="${escapeHtml(ep.name)}" data-index="${index}" draggable="${!reorderDisabled}">
+                <div class="endpoint-card-main">
+                    <div class="endpoint-card-title-row">
+                        <div class="drag-handle" aria-label="${reorderLabel}" title="${reorderLabel}" aria-hidden="${reorderDisabled}">⋮⋮</div>
+                        <div class="endpoint-card-title">
+                            <h3>${escapeHtml(ep.name)}</h3>
+                            <div class="endpoint-badges">
+                                <span class="badge ${testStatusClass}">${escapeHtml(testStatusLabel)}</span>
+                                ${isCurrentEndpoint ? `<span class="badge badge-primary">${t('endpoints.current')}</span>` : ''}
+                                ${getStatusBadge(ep.enabled)}
+                            </div>
+                        </div>
+                        <div class="reorder-actions">
+                            <button class="icon-btn move-up-btn" type="button" draggable="false" data-index="${index}" title="${reorderLabel} ↑" aria-label="${reorderLabel} ↑" ${index === 0 || reorderDisabled ? 'disabled' : ''}>↑</button>
+                            <button class="icon-btn move-down-btn" type="button" draggable="false" data-index="${index}" title="${reorderLabel} ↓" aria-label="${reorderLabel} ↓" ${index === this.endpoints.length - 1 || reorderDisabled ? 'disabled' : ''}>↓</button>
+                        </div>
                     </div>
-                </td>
-                <td data-label="${t('common.name')}">
-                    <div class="endpoint-meta">
-                        <strong>${escapeHtml(ep.name)}</strong>
-                        <span>
-                            <span class="badge ${testStatusClass}" title="${escapeHtml(testStatusLabel)}">${escapeHtml(testStatusLabel)}</span>
-                            ${isCurrentEndpoint ? `<span class="badge badge-primary">${t('endpoints.current')}</span>` : ''}
-                        </span>
-                        ${!isTokenPool ? `<span class="secret-status ${ep.hasApiKey ? 'is-configured' : ''}">${ep.hasApiKey ? t('endpoints.apiKeyConfigured') : t('endpoints.apiKeyMissing')}</span>` : ''}
+                    <div class="endpoint-card-details">
+                        <div class="endpoint-detail endpoint-detail-url">
+                            <span class="detail-label">${t('endpoints.apiUrl')}</span>
+                            <code class="endpoint-url">${escapeHtml(ep.apiUrl)}</code>
+                            <button class="icon-btn copy-btn" type="button" data-copy="${escapeHtml(ep.apiUrl)}" title="${t('endpoints.copyUrl')}" aria-label="${t('endpoints.copyUrl')}">⧉</button>
+                        </div>
+                        <div class="endpoint-detail"><span class="detail-label">${t('endpoints.authMode')}</span><span>${t(`authModes.${ep.authMode || 'api_key'}`)}</span></div>
+                        <div class="endpoint-detail"><span class="detail-label">${t('endpoints.transformer')}</span><span>${escapeHtml(getTransformerLabel(ep.transformer))}</span></div>
+                        <div class="endpoint-detail"><span class="detail-label">${t('endpoints.model')}</span><span>${escapeHtml(ep.model || '-')}</span></div>
+                        ${isTokenPool ? `<div class="endpoint-detail endpoint-token-summary"><span class="detail-label">${t('endpoints.tokenPool')}</span>${this.renderTokenPoolSummary(this.tokenPools[ep.name])}</div>` : `<div class="endpoint-detail"><span class="detail-label">${t('endpoints.apiKey')}</span><span class="secret-status ${ep.hasApiKey ? 'is-configured' : ''}">${ep.hasApiKey ? t('endpoints.apiKeyConfigured') : t('endpoints.apiKeyMissing')}</span></div>`}
                     </div>
-                </td>
-                <td data-label="${t('endpoints.apiUrl')}">
-                    <code class="endpoint-url">${escapeHtml(ep.apiUrl)}</code>
-                    <button class="btn-icon copy-btn" type="button" data-copy="${escapeHtml(ep.apiUrl)}" title="${t('endpoints.copyUrl')}" aria-label="${t('endpoints.copyUrl')}">
-                        <span aria-hidden="true">⧉</span>
-                    </button>
-                </td>
-                <td data-label="${t('endpoints.authMode')}">${t(`authModes.${ep.authMode || 'api_key'}`)}</td>
-                <td data-label="${t('endpoints.transformer')}">${escapeHtml(getTransformerLabel(ep.transformer))}</td>
-                <td data-label="${t('endpoints.model')}">${escapeHtml(ep.model || '-')}</td>
-                <td data-label="${t('endpoints.tokenPool')}">${isTokenPool ? this.renderTokenPoolSummary(this.tokenPools[ep.name]) : '<span class="text-muted">-</span>'}</td>
-                <td data-label="${t('common.status')}">${getStatusBadge(ep.enabled)}</td>
-                <td data-label="${t('common.actions')}">
-                    <div class="actions">
-                        ${ep.enabled && !isCurrentEndpoint ? `
-                            <button class="btn btn-sm btn-secondary switch-btn" type="button" data-name="${escapeHtml(ep.name)}" title="${t('endpoints.switchToEndpoint')}">
-                                ${t('common.switch')}
-                            </button>
-                        ` : ''}
-                        <button class="btn btn-sm btn-secondary test-btn" type="button" data-name="${escapeHtml(ep.name)}">
-                            ${t('common.test')}
-                        </button>
-                        ${isTokenPool ? `<button class="btn btn-sm btn-secondary token-pool-btn" type="button" data-name="${escapeHtml(ep.name)}">${t('endpoints.tokenPoolManagement')}</button>` : ''}
-                        <label class="toggle-switch">
-                            <input type="checkbox" class="toggle-endpoint" data-name="${escapeHtml(ep.name)}" aria-label="${escapeHtml(ep.name)}: ${t('common.enabled')}" ${ep.enabled ? 'checked' : ''}>
-                            <span class="toggle-slider"></span>
-                        </label>
-                        <button class="btn btn-sm btn-secondary edit-btn" type="button" data-name="${escapeHtml(ep.name)}">
-                            ${t('common.edit')}
-                        </button>
-                        <button class="btn btn-sm btn-secondary clone-btn" type="button" data-name="${escapeHtml(ep.name)}">
-                            ${t('common.clone')}
-                        </button>
-                        <button class="btn btn-sm btn-danger delete-btn" type="button" data-name="${escapeHtml(ep.name)}">
-                            ${t('common.delete')}
-                        </button>
-                    </div>
-                </td>
-            </tr>
-        `;
+                </div>
+                <div class="endpoint-card-actions">
+                    ${ep.enabled && !isCurrentEndpoint ? `<button class="btn btn-card btn-secondary switch-btn" type="button" data-name="${escapeHtml(ep.name)}">${t('common.switch')}</button>` : ''}
+                    <button class="btn btn-card btn-secondary test-btn" type="button" data-name="${escapeHtml(ep.name)}">${t('common.test')}</button>
+                    ${isTokenPool ? `<button class="btn btn-card btn-secondary token-pool-btn" type="button" data-name="${escapeHtml(ep.name)}">${t('endpoints.tokenPoolManagement')}</button>` : ''}
+                    <label class="toggle-switch" title="${t(ep.enabled ? 'common.enabled' : 'common.disabled')}">
+                        <input type="checkbox" class="toggle-endpoint" data-name="${escapeHtml(ep.name)}" aria-label="${escapeHtml(ep.name)}: ${t('common.enabled')}" ${ep.enabled ? 'checked' : ''}>
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <button class="btn btn-card btn-secondary edit-btn" type="button" data-name="${escapeHtml(ep.name)}">${t('common.edit')}</button>
+                    <button class="btn btn-card btn-secondary clone-btn" type="button" data-name="${escapeHtml(ep.name)}">${t('common.clone')}</button>
+                    <button class="btn btn-card btn-danger delete-btn" type="button" data-name="${escapeHtml(ep.name)}">${t('common.delete')}</button>
+                </div>
+            </article>`;
     }
 
     renderTokenPoolSummary(pool) {
@@ -328,7 +385,7 @@ class Endpoints {
     }
 
     attachDragListeners() {
-        const rows = document.querySelectorAll('#endpoints-tbody tr[draggable="true"]');
+        const rows = document.querySelectorAll('.endpoint-card[draggable="true"]');
 
         rows.forEach(row => {
             row.addEventListener('dragstart', (e) => {
@@ -338,7 +395,7 @@ class Endpoints {
 
             row.addEventListener('dragend', (e) => {
                 row.classList.remove('is-dragging');
-                document.querySelectorAll('.endpoint-row.is-drop-target').forEach(target => {
+                document.querySelectorAll('.endpoint-card.is-drop-target').forEach(target => {
                     target.classList.remove('is-drop-target');
                 });
                 this.draggedIndex = null;
@@ -495,7 +552,7 @@ class Endpoints {
                             </div>
                             <div class="form-group" id="api-key-group">
                                 <label class="form-label" for="endpoint-api-key">${t('endpoints.apiKey')} <span id="api-key-required">*</span></label>
-                                <input type="password" class="form-input" id="endpoint-api-key" name="apiKey" value="" placeholder="${t('endpoints.apiKeyPlaceholder')}" autocomplete="new-password">
+                                <input type="text" class="form-input" id="endpoint-api-key" name="apiKey" value="${endpoint ? escapeHtml(endpoint.apiKey || '') : ''}" placeholder="${t('endpoints.apiKeyPlaceholder')}" autocomplete="off">
                                 ${apiKeyHint}
                                 ${(isEdit || isClone) ? `<span class="secret-status ${hasApiKey ? 'is-configured' : ''}">${hasApiKey ? t('endpoints.apiKeyConfigured') : t('endpoints.apiKeyMissing')}</span>` : ''}
                                 <div class="form-error" id="api-key-error" role="alert"></div>
@@ -794,11 +851,136 @@ class Endpoints {
         }
     }
 
+    requestTestModel(endpoint) {
+        const configuredModel = endpoint?.model?.trim() || '';
+        const modalContainer = document.getElementById('modal-container');
+        closeAllModals();
+        modalContainer.innerHTML = `
+            <div class="modal-overlay">
+                <div class="modal">
+                    <div class="modal-header">
+                        <h3 class="modal-title">${t('endpoints.testModel')}</h3>
+                        <button class="modal-close" type="button" aria-label="${t('common.close')}">×</button>
+                    </div>
+                    <form id="test-model-form">
+                        <div class="modal-body">
+                            <div class="form-group">
+                                <label class="form-label" for="test-model">${t('endpoints.model')}</label>
+                                <div class="model-picker-row">
+                                    <input class="form-input model-picker-input" id="test-model" name="model" type="text" placeholder="${t('endpoints.modelPlaceholder')}" required>
+                                    <button class="btn btn-secondary model-picker-button test-model-fetch" type="button">${t('endpoints.fetchModels')}</button>
+                                </div>
+                                <select class="form-select test-model-select" aria-label="${t('endpoints.selectModel')}" hidden></select>
+                                <small class="form-hint">${t('endpoints.testModelHelp')}</small>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button class="btn btn-secondary test-model-cancel" type="button">${t('common.cancel')}</button>
+                            <button class="btn btn-primary" type="submit">${t('common.test')}</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        `;
+
+        return new Promise(resolve => {
+            let settled = false;
+            const overlay = modalContainer.querySelector('.modal-overlay');
+            const form = overlay.querySelector('#test-model-form');
+            const input = overlay.querySelector('#test-model');
+            const fetchButton = overlay.querySelector('.test-model-fetch');
+            const modelSelect = overlay.querySelector('.test-model-select');
+            input.value = configuredModel;
+            const controller = activateModal(overlay, {
+                initialFocus: '#test-model',
+                onClose: () => {
+                    if (!settled) {
+                        settled = true;
+                        resolve(null);
+                    }
+                }
+            });
+            const finish = value => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                controller.close();
+                resolve(value);
+            };
+
+            fetchButton.addEventListener('click', async () => {
+                if (!endpoint?.name) {
+                    return;
+                }
+                fetchButton.disabled = true;
+                fetchButton.textContent = t('endpoints.fetchingModels');
+                try {
+                    const result = await api.fetchModels({ endpointName: endpoint.name });
+                    if (!overlay.isConnected) {
+                        return;
+                    }
+                    const models = Array.isArray(result?.models) ? result.models : [];
+                    if (models.length === 0) {
+                        notifications.info(t('endpoints.noModelsFound'));
+                        return;
+                    }
+                    modelSelect.replaceChildren();
+                    const placeholder = document.createElement('option');
+                    placeholder.value = '';
+                    placeholder.textContent = t('endpoints.selectModel');
+                    modelSelect.appendChild(placeholder);
+                    models.forEach(model => {
+                        const option = document.createElement('option');
+                        option.value = String(model);
+                        option.textContent = String(model);
+                        modelSelect.appendChild(option);
+                    });
+                    modelSelect.value = models.includes(input.value) ? input.value : '';
+                    modelSelect.hidden = false;
+                } catch (error) {
+                    if (overlay.isConnected) {
+                        notifications.error(`${t('endpoints.failedToFetchModels')}: ${error.message}`);
+                    }
+                } finally {
+                    if (fetchButton.isConnected) {
+                        fetchButton.disabled = false;
+                        fetchButton.textContent = t('endpoints.fetchModels');
+                    }
+                }
+            });
+            modelSelect.addEventListener('change', () => {
+                if (modelSelect.value) {
+                    input.value = modelSelect.value;
+                    input.setCustomValidity('');
+                }
+            });
+            form.addEventListener('submit', event => {
+                event.preventDefault();
+                const model = input.value.trim();
+                if (!model) {
+                    input.setCustomValidity(t('endpoints.testModelRequired'));
+                    input.reportValidity();
+                    return;
+                }
+                finish(model);
+            });
+            input.addEventListener('input', () => input.setCustomValidity(''));
+            overlay.querySelector('.modal-close').addEventListener('click', () => finish(null));
+            overlay.querySelector('.test-model-cancel').addEventListener('click', () => finish(null));
+        });
+    }
+
     async testEndpoint(name) {
+        const endpoint = this.endpoints.find(item => item.name === name);
+        const testModel = await this.requestTestModel(endpoint);
+        if (testModel == null) {
+            return;
+        }
         const actionVersion = this.beginAction();
         try {
             notifications.info(t('endpoints.testing'));
-            const result = await api.testEndpoint(name);
+            const result = await api.testEndpoint(name, testModel);
             if (!this.isActionCurrent(actionVersion)) {
                 return;
             }

@@ -100,7 +100,10 @@ export function activateModal(overlay, { initialFocus, onClose } = {}) {
     overlay.addEventListener('mousedown', handleBackdrop);
     modalStack.push(controller);
     document.body.classList.add('modal-open');
-    const target = initialFocus ? dialog.querySelector(initialFocus) : dialog.querySelector(focusableSelector);
+    const preferredTarget = initialFocus ? dialog.querySelector(initialFocus) : null;
+    const target = preferredTarget?.matches(focusableSelector)
+        ? preferredTarget
+        : dialog.querySelector(focusableSelector);
     if (modalStack.at(-1) === controller && overlay.isConnected) {
         (target || dialog).focus();
     }
