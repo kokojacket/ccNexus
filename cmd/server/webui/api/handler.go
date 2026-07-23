@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/lich0821/ccNexus/internal/config"
 	"github.com/lich0821/ccNexus/internal/proxy"
@@ -11,10 +12,12 @@ import (
 
 // Handler handles API requests
 type Handler struct {
-	config  *config.Config
-	proxy   *proxy.Proxy
-	storage *storage.SQLiteStorage
-	auth    AuthConfig
+	config             *config.Config
+	proxy              *proxy.Proxy
+	storage            *storage.SQLiteStorage
+	providerHTTPClient *http.Client
+	configMu           sync.Mutex
+	endpointMu         sync.Mutex
 }
 
 // NewHandler creates a new API handler
@@ -23,11 +26,6 @@ func NewHandler(cfg *config.Config, p *proxy.Proxy, s *storage.SQLiteStorage) *H
 		config:  cfg,
 		proxy:   p,
 		storage: s,
-		auth: AuthConfig{
-			Enabled:  cfg.BasicAuthEnabled,
-			Username: cfg.BasicAuthUsername,
-			Password: cfg.BasicAuthPassword,
-		},
 	}
 }
 
@@ -38,7 +36,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		path = "/" + path
 	}
 
-	authMiddleware := BasicAuthMiddleware(h.auth)
+	authMiddleware := BasicAuthMiddleware(h.config)
 
 	switch path {
 	case "/api/endpoints":

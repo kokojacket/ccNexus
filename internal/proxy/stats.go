@@ -23,7 +23,6 @@ type EndpointStats struct {
 	Errors       int                    `json:"errors"`       // Computed from DailyHistory
 	InputTokens  int                    `json:"inputTokens"`  // Computed from DailyHistory
 	OutputTokens int                    `json:"outputTokens"` // Computed from DailyHistory
-	LastUsed     time.Time              `json:"lastUsed"`
 	DailyHistory map[string]*DailyStats `json:"dailyHistory"` // Key: date string (source of truth)
 }
 
@@ -65,9 +64,9 @@ type DailyRecord struct {
 
 // Stats represents overall proxy statistics
 type Stats struct {
-	storage       StatsStorage
-	deviceID      string
-	mu            sync.RWMutex
+	storage  StatsStorage
+	deviceID string
+	mu       sync.RWMutex
 
 	// Save optimization
 	savePending   bool
@@ -244,7 +243,6 @@ func (s *Stats) GetStats() (int, map[string]*EndpointStats) {
 				Errors:       stats.Errors,
 				InputTokens:  int(stats.InputTokens),
 				OutputTokens: int(stats.OutputTokens),
-				LastUsed:     time.Now(),
 				DailyHistory: make(map[string]*DailyStats),
 			}
 		}
@@ -372,7 +370,6 @@ func (s *Stats) Load() error {
 	// With SQLite, stats are loaded on demand from storage
 	return nil
 }
-
 
 // GetPeriodStats returns aggregated statistics for a time period
 func (s *Stats) GetPeriodStats(startDate, endDate string) map[string]*DailyStats {
@@ -547,7 +544,7 @@ func getPeriodDates() (today, yesterday, weekStart, monthStart string) {
 	if weekday == 0 {
 		weekday = 7 // Adjust Sunday to 7
 	}
-	weekStart = now.AddDate(0, 0, -(weekday-1)).Format("2006-01-02")
+	weekStart = now.AddDate(0, 0, -(weekday - 1)).Format("2006-01-02")
 
 	// First day of current month
 	monthStart = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location()).Format("2006-01-02")

@@ -1,4 +1,5 @@
 // Utility functions for formatting data
+import { getLanguage, t } from './i18n.js';
 
 export function formatNumber(num) {
     if (num >= 1000000) {
@@ -21,12 +22,12 @@ export function formatPercentage(value) {
 
 export function formatDate(dateString) {
     const date = new Date(dateString);
-    return date.toLocaleDateString();
+    return date.toLocaleDateString(getLanguage());
 }
 
 export function formatDateTime(dateString) {
     const date = new Date(dateString);
-    return date.toLocaleString();
+    return date.toLocaleString(getLanguage());
 }
 
 export function formatLatency(ms) {
@@ -37,25 +38,25 @@ export function formatLatency(ms) {
 }
 
 export function getTransformerLabel(transformer) {
-    const labels = {
-        'claude': 'Claude',
-        'openai': 'OpenAI',
-        'openai2': 'OpenAI Responses',
-        'gemini': 'Gemini',
-        'deepseek': 'DeepSeek'
-    };
-    return labels[transformer] || transformer;
+    const key = `transformers.${transformer}`;
+    const label = t(key);
+    return label === key ? transformer : label;
 }
 
 export function getStatusBadge(enabled) {
     if (enabled) {
-        return '<span class="badge badge-success">Enabled</span>';
+        return `<span class="badge badge-success">${t('common.enabled')}</span>`;
     }
-    return '<span class="badge badge-danger">Disabled</span>';
+    return `<span class="badge badge-danger">${t('common.disabled')}</span>`;
 }
 
 export function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    const entities = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    };
+    return String(text ?? '').replace(/[&<>"']/g, character => entities[character]);
 }

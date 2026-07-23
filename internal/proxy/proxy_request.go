@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -40,6 +42,7 @@ type endpointAttempt struct {
 	modelName          string
 	thinkingEnabled    bool
 	proxyRequest       *http.Request
+	requestContext     context.Context
 	response           *http.Response
 }
 
@@ -165,7 +168,8 @@ func (p *Proxy) runEndpointAttempt(w http.ResponseWriter, reqCtx *proxyRequestCo
 	}
 
 	p.logUpstreamRequest(reqCtx, attempt)
-	resp, err := sendRequest(p.getEndpointContext(attempt.endpoint.Name), attempt.proxyRequest, p.httpClient, p.config)
+	attempt.requestContext = p.getEndpointContext(attempt.endpoint.Name)
+	resp, err := sendRequest(attempt.requestContext, attempt.proxyRequest, p.httpClient, p.configSnapshot())
 	if err != nil {
 		return p.handleSendError(err, attempt)
 	}
@@ -217,7 +221,7 @@ func (p *Proxy) prepareEndpointAttempt(reqCtx *proxyRequestContext, attempt *end
 
 	proxyReq, err := buildProxyRequest(reqCtx.httpRequest, attempt.endpoint, attempt.apiKey, attempt.transformedBody, attempt.transformerName, attempt.modelName, attempt.selectedCredential)
 	if err != nil {
-		logger.Error("[%s] Failed to create request: %v", attempt.endpoint.Name, err)
+		logger.Error("[%s] Failed to create request: %s", attempt.endpoint.Name, redactAttemptMessage(err.Error(), attempt))
 		p.stats.RecordError(attempt.endpoint.Name)
 		return attemptResultRetryNextEndpoint
 	}
@@ -247,7 +251,7 @@ func (p *Proxy) resolveAttemptAuth(reqCtx *proxyRequestContext, attempt *endpoin
 		if shouldTryCredentialRefresh(credential, time.Now().UTC()) {
 			refreshed, refreshErr := p.refreshCredential(attempt.endpoint, credential)
 			if refreshErr != nil {
-				logger.Warn("[%s] Preflight credential refresh failed (id=%d): %v", attempt.endpoint.Name, credential.ID, refreshErr)
+				logger.Warn("[%s] Preflight credential refresh failed (id=%d): %s", attempt.endpoint.Name, credential.ID, redactAttemptMessage(refreshErr.Error(), attempt))
 			} else {
 				attempt.selectedCredential = refreshed
 				reqCtx.refreshedCredentialAttempts[refreshed.ID] = true
@@ -272,7 +276,7 @@ func (p *Proxy) resolveAttemptAuth(reqCtx *proxyRequestContext, attempt *endpoin
 }
 
 func (p *Proxy) logUpstreamRequest(reqCtx *proxyRequestContext, attempt *endpointAttempt) {
-	proxyLabel := strings.TrimSpace(resolveProxyURLForRequest(p.config, attempt.proxyRequest.URL))
+	proxyLabel := redactURLForLog(resolveProxyURLForRequest(p.configSnapshot(), attempt.proxyRequest.URL))
 	action := "Requesting"
 	if reqCtx.streamRequested {
 		action = "Streaming"
@@ -285,14 +289,20 @@ func (p *Proxy) logUpstreamRequest(reqCtx *proxyRequestContext, attempt *endpoin
 }
 
 func (p *Proxy) handleSendError(err error, attempt *endpointAttempt) attemptResult {
-	logger.Error("[%s] Request failed: %v", attempt.endpoint.Name, err)
+	if attemptCanceledByEndpointSwitch(attempt) {
+		logger.Debug("[%s] Request stopped after endpoint switch", attempt.endpoint.Name)
+		p.markRequestInactive(attempt.endpoint.Name)
+		return attemptResultRetryNextEndpoint
+	}
+	errMsg := redactAttemptMessage(err.Error(), attempt)
+	logger.Error("[%s] Request failed: %s", attempt.endpoint.Name, errMsg)
 	p.markRequestInactive(attempt.endpoint.Name)
 	if isTransientNetworkError(err) {
-		logger.Warn("[%s] Transient network error, retrying same endpoint: %v", attempt.endpoint.Name, err)
+		logger.Warn("[%s] Transient network error, retrying same endpoint: %s", attempt.endpoint.Name, errMsg)
 		time.Sleep(300 * time.Millisecond)
 		return attemptResultRetrySameEndpoint
 	}
-	p.markCredentialFailure(attempt.credentialID, 0, err.Error())
+	p.markCredentialFailure(attempt.credentialID, 0, errMsg)
 	p.recordCredentialUsage(attempt.credentialID, attempt.endpoint.Name, 0, 1, 0, 0)
 	p.stats.RecordError(attempt.endpoint.Name)
 	return attemptResultRetryNextEndpoint
@@ -310,7 +320,22 @@ func (p *Proxy) handleAttemptResponse(w http.ResponseWriter, reqCtx *proxyReques
 
 	isStreaming := shouldHandleAsStreamingResponse(resp.Header.Get("Content-Type"), reqCtx.streamRequested, attempt.endpoint, attempt.transformerName)
 	if resp.StatusCode == http.StatusOK && isStreaming {
-		inputTokens, outputTokens, outputText := p.handleStreamingResponse(w, resp, attempt.endpoint, attempt.transformer, attempt.transformerName, attempt.thinkingEnabled, attempt.modelName, reqCtx.bodyBytes, attempt.credentialID)
+		inputTokens, outputTokens, outputText, err := p.handleStreamingResponse(w, resp, attempt.endpoint, attempt.transformer, attempt.transformerName, attempt.thinkingEnabled, attempt.modelName, reqCtx.bodyBytes, attempt.credentialID)
+		if err != nil {
+			errMsg := redactAttemptMessage(err.Error(), attempt)
+			if attemptCanceledByEndpointSwitch(attempt) || errors.Is(err, errEndpointSwitched) {
+				logger.Debug("[%s] Streaming stopped after endpoint switch", attempt.endpoint.Name)
+			} else if errors.Is(err, errClientDisconnected) {
+				logger.Debug("[%s] Client disconnected during streaming: %s", attempt.endpoint.Name, errMsg)
+			} else {
+				logger.Error("[%s] Streaming response failed: %s", attempt.endpoint.Name, errMsg)
+				p.markCredentialFailure(attempt.credentialID, 0, errMsg)
+				p.recordCredentialUsage(attempt.credentialID, attempt.endpoint.Name, 0, 1, 0, 0)
+				p.stats.RecordError(attempt.endpoint.Name)
+			}
+			p.markRequestInactive(attempt.endpoint.Name)
+			return attemptResultDone
+		}
 		p.finishSuccessfulAttempt(reqCtx, attempt, inputTokens, outputTokens, outputText)
 		return attemptResultDone
 	}
@@ -336,13 +361,23 @@ func (p *Proxy) handleAggregatedStreamingSuccess(w http.ResponseWriter, reqCtx *
 		p.finishSuccessfulAttempt(reqCtx, attempt, inputTokens, outputTokens, outputText)
 		return attemptResultDone
 	}
+	if attemptCanceledByEndpointSwitch(attempt) {
+		logger.Debug("[%s] Aggregated response stopped after endpoint switch", attempt.endpoint.Name)
+		p.markRequestInactive(attempt.endpoint.Name)
+		return attemptResultRetryNextEndpoint
+	}
 
-	logger.Warn("[%s] Failed to aggregate streaming response as non-stream: %v", attempt.endpoint.Name, err)
-	p.markCredentialFailure(attempt.credentialID, 0, err.Error())
+	errMsg := redactAttemptMessage(err.Error(), attempt)
+	logger.Warn("[%s] Failed to aggregate streaming response as non-stream: %s", attempt.endpoint.Name, errMsg)
+	p.markCredentialFailure(attempt.credentialID, 0, errMsg)
 	p.recordCredentialUsage(attempt.credentialID, attempt.endpoint.Name, 0, 1, 0, 0)
 	p.stats.RecordError(attempt.endpoint.Name)
 	p.markRequestInactive(attempt.endpoint.Name)
 	return attemptResultRetryNextEndpoint
+}
+
+func attemptCanceledByEndpointSwitch(attempt *endpointAttempt) bool {
+	return attempt != nil && attempt.requestContext != nil && errors.Is(context.Cause(attempt.requestContext), errEndpointSwitched)
 }
 
 func (p *Proxy) finishSuccessfulAttempt(reqCtx *proxyRequestContext, attempt *endpointAttempt, inputTokens, outputTokens int, outputText string) {
@@ -363,7 +398,7 @@ func (p *Proxy) finishSuccessfulAttempt(reqCtx *proxyRequestContext, attempt *en
 
 func (p *Proxy) handleRetryableStatus(resp *http.Response, attempt *endpointAttempt) attemptResult {
 	errBody := readResponseBody(resp)
-	errMsg := truncateString(string(errBody), 200)
+	errMsg := truncateString(redactAttemptMessage(string(errBody), attempt), 200)
 	logger.Warn("[%s] Request failed %d: %s", attempt.endpoint.Name, resp.StatusCode, errMsg)
 	logger.DebugLog("[%s] Request failed %d: %s", attempt.endpoint.Name, resp.StatusCode, errMsg)
 	p.markCredentialFailure(attempt.credentialID, resp.StatusCode, errMsg)
@@ -379,7 +414,7 @@ func (p *Proxy) handleFinalStatus(w http.ResponseWriter, reqCtx *proxyRequestCon
 	skipCredentialPenalty := false
 
 	if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && attempt.credentialID > 0 {
-		errMsg := truncateString(string(respBody), 500)
+		errMsg := truncateString(redactAttemptMessage(string(respBody), attempt), 500)
 		if !shouldTreatCredentialAuthFailure(resp.StatusCode, errMsg) {
 			skipCredentialPenalty = true
 			logger.Warn("[%s] Upstream %d looks like route/gateway denial, skipping credential invalidation", attempt.endpoint.Name, resp.StatusCode)
@@ -401,7 +436,7 @@ func (p *Proxy) handleFinalStatus(w http.ResponseWriter, reqCtx *proxyRequestCon
 
 	p.markRequestInactive(attempt.endpoint.Name)
 	if resp.StatusCode != http.StatusOK {
-		errMsg := truncateString(string(respBody), 500)
+		errMsg := truncateString(redactAttemptMessage(string(respBody), attempt), 500)
 		if resp.StatusCode == http.StatusBadRequest &&
 			strings.Contains(errMsg, "api.responses.write") &&
 			strings.Contains(attempt.transformerName, "openai2") {
@@ -419,7 +454,11 @@ func (p *Proxy) handleFinalStatus(w http.ResponseWriter, reqCtx *proxyRequestCon
 
 	copyResponseHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(respBody)
+	responseBody := respBody
+	if resp.StatusCode != http.StatusOK {
+		responseBody = []byte(redactAttemptMessage(string(respBody), attempt))
+	}
+	_, _ = w.Write(responseBody)
 	return attemptResultDone
 }
 
@@ -440,7 +479,7 @@ func (p *Proxy) tryRefreshAfterAuthFailure(reqCtx *proxyRequestContext, attempt 
 		}
 		return true
 	}
-	logger.Warn("[%s] Credential refresh failed after %d (id=%d): %v", attempt.endpoint.Name, statusCode, attempt.credentialID, refreshErr)
+	logger.Warn("[%s] Credential refresh failed after %d (id=%d): %s", attempt.endpoint.Name, statusCode, attempt.credentialID, redactAttemptMessage(refreshErr.Error(), attempt))
 	return false
 }
 

@@ -234,6 +234,7 @@ export async function renderEndpoints(endpoints) {
         item.className = 'endpoint-item';
         item.dataset.name = ep.name;
         item.dataset.index = index;
+        item.dataset.model = model;
 
         // 筛选激活时禁用拖拽
         if (isFiltered) {
@@ -1615,6 +1616,7 @@ function renderCompactView(sortedEndpoints, container, currentEndpointName, isFi
         item.className = 'endpoint-item-compact';
         item.dataset.name = ep.name;
         item.dataset.index = index;
+        item.dataset.model = model;
 
         // 筛选激活时禁用拖拽
         if (isFiltered) {

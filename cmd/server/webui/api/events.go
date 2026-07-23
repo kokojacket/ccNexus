@@ -20,7 +20,6 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	// Create a flusher
 	flusher, ok := w.(http.Flusher)
@@ -49,29 +48,7 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 			logger.Debug("[SSE] Client disconnected")
 			return
 		case <-ticker.C:
-			// Send stats update
-			stats := h.proxy.GetStats()
-
-			// Get current endpoint
-			endpoints := h.config.GetEndpoints()
-			var currentEndpoint string
-			if len(endpoints) > 0 {
-				for _, ep := range endpoints {
-					if ep.Enabled {
-						currentEndpoint = ep.Name
-						break
-					}
-				}
-			}
-
-			event := map[string]interface{}{
-				"type":            "stats",
-				"timestamp":       time.Now().Unix(),
-				"stats":           stats,
-				"currentEndpoint": currentEndpoint,
-			}
-
-			data, err := json.Marshal(event)
+			data, err := json.Marshal(h.newStatsEvent(time.Now()))
 			if err != nil {
 				logger.Error("[SSE] Failed to marshal event: %v", err)
 				continue
@@ -81,5 +58,14 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "data: %s\n\n", string(data))
 			flusher.Flush()
 		}
+	}
+}
+
+func (h *Handler) newStatsEvent(now time.Time) map[string]interface{} {
+	return map[string]interface{}{
+		"type":            "stats",
+		"timestamp":       now.Unix(),
+		"stats":           h.statsSummary(),
+		"currentEndpoint": h.proxy.GetCurrentEndpointName(),
 	}
 }

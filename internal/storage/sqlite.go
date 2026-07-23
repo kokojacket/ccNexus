@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -10,6 +11,8 @@ import (
 	"github.com/lich0821/ccNexus/internal/config"
 	_ "modernc.org/sqlite"
 )
+
+var ErrEndpointNotFound = errors.New("endpoint not found")
 
 // escapeSQLString escapes single quotes in SQL string literals to prevent injection
 func escapeSQLString(s string) string {
@@ -270,21 +273,67 @@ func (s *SQLiteStorage) SaveEndpoint(ep *Endpoint) error {
 }
 
 func (s *SQLiteStorage) UpdateEndpoint(ep *Endpoint) error {
+	return s.UpdateEndpointByName(ep.Name, ep)
+}
+
+func (s *SQLiteStorage) UpdateEndpointByName(originalName string, ep *Endpoint) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	normalizeEndpointAuthMode(ep)
 
-	_, err := s.db.Exec(`UPDATE endpoints SET api_url=?, api_key=?, auth_mode=?, enabled=?, transformer=?, model=?, remark=?, sort_order=?, updated_at=CURRENT_TIMESTAMP WHERE name=?`,
-		ep.APIUrl, ep.APIKey, ep.AuthMode, ep.Enabled, ep.Transformer, ep.Model, ep.Remark, ep.SortOrder, ep.Name)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	result, err := tx.Exec(`UPDATE endpoints SET name=?, api_url=?, api_key=?, auth_mode=?, enabled=?, transformer=?, model=?, remark=?, sort_order=?, updated_at=CURRENT_TIMESTAMP WHERE name=?`,
+		ep.Name, ep.APIUrl, ep.APIKey, ep.AuthMode, ep.Enabled, ep.Transformer, ep.Model, ep.Remark, ep.SortOrder, originalName)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrEndpointNotFound
+	}
+
+	if originalName != ep.Name {
+		for _, statement := range []string{
+			`UPDATE endpoint_credentials SET endpoint_name=? WHERE endpoint_name=?`,
+			`UPDATE credential_usage SET endpoint_name=? WHERE endpoint_name=?`,
+			`UPDATE daily_stats SET endpoint_name=? WHERE endpoint_name=?`,
+		} {
+			if _, err := tx.Exec(statement, ep.Name, originalName); err != nil {
+				return err
+			}
+		}
+	}
+
+	return tx.Commit()
 }
 
 func (s *SQLiteStorage) DeleteEndpoint(name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, err := s.db.Exec(`
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var endpointID int64
+	if err := tx.QueryRow(`SELECT id FROM endpoints WHERE name=?`, name).Scan(&endpointID); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrEndpointNotFound
+		}
+		return err
+	}
+
+	if _, err := tx.Exec(`
 		DELETE FROM credential_rate_limits
 		WHERE credential_id IN (
 			SELECT id FROM endpoint_credentials WHERE endpoint_name=?
@@ -292,12 +341,71 @@ func (s *SQLiteStorage) DeleteEndpoint(name string) error {
 	`, name); err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`DELETE FROM endpoint_credentials WHERE endpoint_name=?`, name); err != nil {
+	if _, err := tx.Exec(`
+		DELETE FROM credential_usage
+		WHERE endpoint_name=? OR credential_id IN (
+			SELECT id FROM endpoint_credentials WHERE endpoint_name=?
+		)
+	`, name, name); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`DELETE FROM endpoint_credentials WHERE endpoint_name=?`, name); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM endpoints WHERE name=?`, name); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
-	_, err := s.db.Exec(`DELETE FROM endpoints WHERE name=?`, name)
-	return err
+func (s *SQLiteStorage) ReorderEndpoints(names []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(`SELECT name FROM endpoints`)
+	if err != nil {
+		return err
+	}
+	existing := make(map[string]struct{})
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[name] = struct{}{}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(names) != len(existing) {
+		return fmt.Errorf("endpoint order must contain every endpoint exactly once")
+	}
+
+	seen := make(map[string]struct{}, len(names))
+	for index, name := range names {
+		if _, ok := existing[name]; !ok {
+			return fmt.Errorf("endpoint %q does not exist", name)
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return fmt.Errorf("endpoint %q appears more than once", name)
+		}
+		seen[name] = struct{}{}
+		if _, err := tx.Exec(`UPDATE endpoints SET sort_order=?, updated_at=CURRENT_TIMESTAMP WHERE name=?`, index, name); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
 
 func (s *SQLiteStorage) RecordDailyStat(stat *DailyStat) error {
@@ -383,6 +491,24 @@ func (s *SQLiteStorage) SetConfig(key, value string) error {
 
 	_, err := s.db.Exec(`INSERT INTO app_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`, key, value)
 	return err
+}
+
+func (s *SQLiteStorage) SetConfigs(values map[string]string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for key, value := range values {
+		if _, err := tx.Exec(`INSERT INTO app_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`, key, value); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *SQLiteStorage) Close() error {

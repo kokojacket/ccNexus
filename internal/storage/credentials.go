@@ -2,10 +2,13 @@ package storage
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 )
+
+var ErrCredentialNotFound = errors.New("credential not found")
 
 const (
 	credentialStatusActive      = "active"
@@ -317,10 +320,26 @@ func (s *SQLiteStorage) DeleteEndpointCredential(endpointName string, id int64) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, err := s.db.Exec(`DELETE FROM credential_rate_limits WHERE credential_id=?`, id); err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
 		return err
 	}
-	result, err := s.db.Exec(`DELETE FROM endpoint_credentials WHERE endpoint_name=? AND id=?`, endpointName, id)
+	defer tx.Rollback()
+
+	var existingID int64
+	if err := tx.QueryRow(`SELECT id FROM endpoint_credentials WHERE endpoint_name=? AND id=?`, endpointName, id).Scan(&existingID); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrCredentialNotFound
+		}
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM credential_rate_limits WHERE credential_id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM credential_usage WHERE credential_id=?`, id); err != nil {
+		return err
+	}
+	result, err := tx.Exec(`DELETE FROM endpoint_credentials WHERE endpoint_name=? AND id=?`, endpointName, id)
 	if err != nil {
 		return err
 	}
@@ -330,10 +349,10 @@ func (s *SQLiteStorage) DeleteEndpointCredential(endpointName string, id int64) 
 		return err
 	}
 	if affected == 0 {
-		return fmt.Errorf("credential not found")
+		return ErrCredentialNotFound
 	}
 
-	return nil
+	return tx.Commit()
 }
 
 func (s *SQLiteStorage) SetEndpointCredentialEnabled(endpointName string, id int64, enabled bool) error {

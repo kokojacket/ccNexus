@@ -61,8 +61,8 @@ export async function testEndpoint(index) {
     return JSON.parse(resultStr);
 }
 
-export async function testEndpointLight(index) {
-    const resultStr = await window.go.main.App.TestEndpointLight(index);
+export async function testEndpointLight(index, model = '') {
+    const resultStr = await window.go.main.App.TestEndpointLightWithModel(index, model);
     return JSON.parse(resultStr);
 }
 

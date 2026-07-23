@@ -630,13 +630,139 @@ function isTestNotSupported(statusCode, message) {
     return false;
 }
 
+function requestTestModel(endpoint = {}) {
+    const configuredModel = endpoint.model?.trim() || '';
+    const overlay = document.createElement('div');
+    overlay.className = 'modal active';
+    overlay.innerHTML = `
+        <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="testModelTitle">
+            <div class="modal-header">
+                <h2 id="testModelTitle">${escapeHtml(t('modal.testModel'))}</h2>
+            </div>
+            <form>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label for="temporaryTestModel">${escapeHtml(t('modal.model'))}</label>
+                        <div class="model-input-wrapper">
+                            <input class="form-input" id="temporaryTestModel" name="model" type="text" placeholder="${escapeHtml(t('modal.modelPlaceholder'))}" required>
+                            <button class="btn btn-secondary test-model-fetch" type="button">${escapeHtml(t('modal.fetchModels'))}</button>
+                        </div>
+                        <select class="form-input test-model-select" aria-label="${escapeHtml(t('modal.selectModel'))}" hidden></select>
+                        <small>${escapeHtml(t('modal.testModelHelp'))}</small>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary test-model-cancel" type="button">${escapeHtml(t('common.cancel'))}</button>
+                    <button class="btn btn-primary" type="submit">${escapeHtml(t('endpoints.test'))}</button>
+                </div>
+            </form>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+
+    return new Promise(resolve => {
+        let settled = false;
+        const form = overlay.querySelector('form');
+        const input = overlay.querySelector('#temporaryTestModel');
+        const fetchButton = overlay.querySelector('.test-model-fetch');
+        const modelSelect = overlay.querySelector('.test-model-select');
+        input.value = configuredModel;
+        const finish = value => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            overlay.remove();
+            resolve(value);
+        };
+
+        fetchButton.addEventListener('click', async () => {
+            fetchButton.disabled = true;
+            fetchButton.textContent = '⏳';
+            try {
+                const resultStr = await window.go.main.App.FetchModels(endpoint.apiUrl, endpoint.apiKey, endpoint.transformer);
+                if (!overlay.isConnected) {
+                    return;
+                }
+                const result = JSON.parse(resultStr);
+                const models = result.success && Array.isArray(result.models) ? result.models : [];
+                if (models.length === 0) {
+                    showNotification(t('modal.fetchModelsEmpty'), 'error');
+                    return;
+                }
+                modelSelect.replaceChildren();
+                const placeholder = document.createElement('option');
+                placeholder.value = '';
+                placeholder.textContent = t('modal.selectModel');
+                modelSelect.appendChild(placeholder);
+                models.forEach(model => {
+                    const option = document.createElement('option');
+                    option.value = String(model);
+                    option.textContent = String(model);
+                    modelSelect.appendChild(option);
+                });
+                modelSelect.value = models.includes(input.value) ? input.value : '';
+                modelSelect.hidden = false;
+                showNotification(t('modal.fetchModelsSuccess').replace('{count}', models.length), 'success');
+            } catch (error) {
+                if (overlay.isConnected) {
+                    showNotification(`${t('modal.fetchModelsFailed')}: ${error}`, 'error');
+                }
+            } finally {
+                if (fetchButton.isConnected) {
+                    fetchButton.disabled = false;
+                    fetchButton.textContent = t('modal.fetchModels');
+                }
+            }
+        });
+        modelSelect.addEventListener('change', () => {
+            if (modelSelect.value) {
+                input.value = modelSelect.value;
+                input.setCustomValidity('');
+            }
+        });
+        form.addEventListener('submit', event => {
+            event.preventDefault();
+            const value = input.value.trim();
+            if (!value) {
+                input.setCustomValidity(t('modal.testModelRequired'));
+                input.reportValidity();
+                return;
+            }
+            finish(value);
+        });
+        input.addEventListener('input', () => input.setCustomValidity(''));
+        overlay.querySelector('.test-model-cancel').addEventListener('click', () => finish(null));
+        overlay.addEventListener('mousedown', event => {
+            if (event.target === overlay) {
+                finish(null);
+            }
+        });
+        overlay.addEventListener('keydown', event => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                finish(null);
+            }
+        });
+        requestAnimationFrame(() => input.focus());
+    });
+}
+
 // Test Result Modal
 export async function testEndpointHandler(index, buttonElement) {
-    setTestState(buttonElement, index);
-
     // 获取端点名称用于保存测试状态（兼容详情视图和简洁视图）
     const endpointItem = buttonElement.closest('.endpoint-item') || buttonElement.closest('.endpoint-item-compact');
     const endpointName = endpointItem ? endpointItem.dataset.name : null;
+    const endpoint = {
+        ...(window.config?.endpoints?.[index] || {}),
+        model: endpointItem?.dataset.model || ''
+    };
+    const testModel = await requestTestModel(endpoint);
+    if (testModel == null) {
+        return;
+    }
+
+    setTestState(buttonElement, index);
 
     // 简洁视图：同时更新 moreBtn
     const moreBtn = endpointItem ? endpointItem.querySelector('[data-action="more"]') : null;
@@ -650,7 +776,7 @@ export async function testEndpointHandler(index, buttonElement) {
         buttonElement.innerHTML = '⏳';
 
         // 使用轻量级测试（优先零消耗方法）
-        const result = await testEndpointLight(index);
+        const result = await testEndpointLight(index, testModel);
 
         const resultContent = document.getElementById('testResultContent');
         const resultTitle = document.getElementById('testResultTitle');

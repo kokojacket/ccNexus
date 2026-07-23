@@ -38,15 +38,15 @@ type Proxy struct {
 	currentIndex      int
 	mu                sync.RWMutex
 	server            *http.Server
-	httpClient        *http.Client                  // Reusable HTTP client with connection pool
-	activeRequests    map[string]bool               // tracks active requests by endpoint name
-	activeRequestsMu  sync.RWMutex                  // protects activeRequests map
-	endpointCtx       map[string]context.Context    // context per endpoint for cancellation
-	endpointCancel    map[string]context.CancelFunc // cancel functions per endpoint
-	ctxMu             sync.RWMutex                  // protects context maps
-	onEndpointSuccess func(endpointName string)     // callback when endpoint request succeeds
-	modelsCache       *ModelsCache                  // Cache for /v1/models endpoint
-	resolver          *EndpointResolver             // 端点解析器，用于解析客户端指定的端点
+	httpClient        *http.Client                       // Reusable HTTP client with connection pool
+	activeRequests    map[string]bool                    // tracks active requests by endpoint name
+	activeRequestsMu  sync.RWMutex                       // protects activeRequests map
+	endpointCtx       map[string]context.Context         // context per endpoint for cancellation
+	endpointCancel    map[string]context.CancelCauseFunc // cancel functions per endpoint
+	ctxMu             sync.RWMutex                       // protects context maps
+	onEndpointSuccess func(endpointName string)          // callback when endpoint request succeeds
+	modelsCache       *ModelsCache                       // Cache for /v1/models endpoint
+	resolver          *EndpointResolver                  // 端点解析器，用于解析客户端指定的端点
 }
 
 // New creates a new Proxy instance
@@ -78,10 +78,19 @@ func New(cfg *config.Config, statsStorage StatsStorage, sqliteStorage *storage.S
 		httpClient:     httpClient,
 		activeRequests: make(map[string]bool),
 		endpointCtx:    make(map[string]context.Context),
-		endpointCancel: make(map[string]context.CancelFunc),
+		endpointCancel: make(map[string]context.CancelCauseFunc),
 		modelsCache:    NewModelsCache(cfg.ModelsCacheTTL),
 		resolver:       NewEndpointResolverWithFunc(cfg.GetEndpoints),
 	}
+}
+
+func (p *Proxy) configSnapshot() *config.Config {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.config
 }
 
 // SetOnEndpointSuccess sets the callback for successful endpoint requests
@@ -96,7 +105,8 @@ func (p *Proxy) Start() error {
 
 // StartWithMux starts the proxy server with an optional custom mux
 func (p *Proxy) StartWithMux(customMux *http.ServeMux) error {
-	port := p.config.GetPort()
+	cfg := p.configSnapshot()
+	port := cfg.GetPort()
 
 	var mux *http.ServeMux
 	if customMux != nil {
@@ -122,7 +132,7 @@ func (p *Proxy) StartWithMux(customMux *http.ServeMux) error {
 	}
 
 	logger.Info("ccNexus starting on port %d", port)
-	logger.Info("Configured %d endpoints", len(p.config.GetEndpoints()))
+	logger.Info("Configured %d endpoints", len(cfg.GetEndpoints()))
 
 	return p.server.ListenAndServe()
 }
@@ -135,8 +145,20 @@ func (p *Proxy) Stop() error {
 	return nil
 }
 
-// getEnabledEndpoints returns only the enabled endpoints
+// getEnabledEndpoints returns only the enabled endpoints (thread-safe).
 func (p *Proxy) getEnabledEndpoints() []config.Endpoint {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	return p.getEnabledEndpointsLocked()
+}
+
+// getEnabledEndpointsLocked returns enabled endpoints while p.mu is held.
+func (p *Proxy) getEnabledEndpointsLocked() []config.Endpoint {
+	if p.config == nil {
+		return nil
+	}
+
 	allEndpoints := p.config.GetEndpoints()
 	enabled := make([]config.Endpoint, 0)
 	for _, ep := range allEndpoints {
@@ -152,7 +174,7 @@ func (p *Proxy) getCurrentEndpoint() config.Endpoint {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	endpoints := p.getEnabledEndpoints()
+	endpoints := p.getEnabledEndpointsLocked()
 	if len(endpoints) == 0 {
 		// Return empty endpoint if no enabled endpoints
 		return config.Endpoint{}
@@ -198,7 +220,7 @@ func (p *Proxy) getEndpointContext(endpointName string) context.Context {
 		return ctx
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancelCause(context.Background())
 	p.endpointCtx[endpointName] = ctx
 	p.endpointCancel[endpointName] = cancel
 	return ctx
@@ -210,7 +232,7 @@ func (p *Proxy) cancelEndpointRequests(endpointName string) {
 	defer p.ctxMu.Unlock()
 
 	if cancel, ok := p.endpointCancel[endpointName]; ok {
-		cancel()
+		cancel(errEndpointSwitched)
 		delete(p.endpointCtx, endpointName)
 		delete(p.endpointCancel, endpointName)
 	}
@@ -237,7 +259,7 @@ func (p *Proxy) rotateEndpoint() config.Endpoint {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	endpoints := p.getEnabledEndpoints()
+	endpoints := p.getEnabledEndpointsLocked()
 	if len(endpoints) == 0 {
 		return config.Endpoint{}
 	}
@@ -269,7 +291,7 @@ func (p *Proxy) SetCurrentEndpoint(targetName string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	endpoints := p.getEnabledEndpoints()
+	endpoints := p.getEnabledEndpointsLocked()
 	if len(endpoints) == 0 {
 		return fmt.Errorf("no enabled endpoints")
 	}
@@ -345,6 +367,9 @@ func (p *Proxy) recordCredentialUsage(credentialID int64, endpointName string, r
 func (p *Proxy) markCredentialFailure(credentialID int64, statusCode int, errMsg string) {
 	if credentialID <= 0 || p.storage == nil {
 		return
+	}
+	if credential, err := p.storage.GetCredentialByID(credentialID); err == nil {
+		errMsg = redactCredentialMessage(errMsg, credential)
 	}
 	if err := p.storage.MarkCredentialFailure(credentialID, statusCode, errMsg, time.Now().UTC()); err != nil {
 		logger.Warn("Failed to mark credential failure (id=%d): %v", credentialID, err)

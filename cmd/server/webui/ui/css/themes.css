@@ -1,43 +1,40 @@
-/* Dark theme */
 body.dark-theme {
-    --primary-color: #60a5fa;
-    --primary-hover: #3b82f6;
-    --success-color: #34d399;
-    --danger-color: #f87171;
-    --warning-color: #fbbf24;
-    --bg-primary: #1f2937;
-    --bg-secondary: #111827;
-    --bg-tertiary: #374151;
-    --text-primary: #f9fafb;
-    --text-secondary: #9ca3af;
-    --border-color: #374151;
-    --shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.3);
-    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+    color-scheme: dark;
+    --bg-gradient-start: #121212;
+    --bg-gradient-end: #1a1a1a;
+    --bg-primary: #1e1e1e;
+    --bg-secondary: #2a2a2a;
+    --bg-tertiary: #333333;
+    --input-bg: #333333;
+    --hover-bg: #2f2f2f;
+    --text-primary: #e0e0e0;
+    --text-secondary: #b0b0b0;
+    --text-tertiary: #808080;
+    --border-color: #444444;
+    --border-light: #3a3a3a;
+    --primary-color: #7c8adb;
+    --primary-hover: #6a7acf;
+    --primary-soft: rgba(124, 138, 219, 0.16);
+    --success-soft: rgba(40, 167, 69, 0.18);
+    --success-text: #7bd88f;
+    --danger-soft: rgba(220, 53, 69, 0.2);
+    --danger-text: #ff9aa5;
+    --warning-soft: rgba(217, 154, 0, 0.18);
+    --warning-text: #ffd36d;
+    --info-soft: rgba(102, 126, 234, 0.18);
+    --info-text: #aeb9ff;
+    --shadow-color: rgba(0, 0, 0, 0.3);
+    --shadow-card: 0 4px 8px rgba(0, 0, 0, 0.28);
+    --shadow-modal: 0 18px 60px rgba(0, 0, 0, 0.52);
+    --code-bg: #202020;
+    --code-text: #d9d9d9;
 }
 
-/* Dark theme badge adjustments */
-body.dark-theme .badge-success {
-    background-color: #064e3b;
-    color: #6ee7b7;
+body.dark-theme .btn-secondary {
+    color: var(--text-primary);
+    background: #454545;
 }
 
-body.dark-theme .badge-danger {
-    background-color: #7f1d1d;
-    color: #fca5a5;
-}
-
-body.dark-theme .badge-warning {
-    background-color: #78350f;
-    color: #fcd34d;
-}
-
-body.dark-theme .badge-info {
-    background-color: #1e3a8a;
-    color: #93c5fd;
-}
-
-/* Dark theme code block */
-body.dark-theme .code-block {
-    background-color: #0f172a;
-    color: #cbd5e1;
+body.dark-theme .btn-secondary:hover:not(:disabled) {
+    background: #525252;
 }
