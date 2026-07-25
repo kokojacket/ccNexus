@@ -184,7 +184,7 @@ func (p *Proxy) fetchCodexRateLimitsForCredential(ctx context.Context, endpoint 
 		return nil, "network", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		errMsg := truncateForLog(string(body), 300)
+		errMsg := truncateForLog(redactCredentialMessage(string(body), credential), 300)
 		if isLikelyHTMLResponse(body) {
 			return nil, "blocked", fmt.Errorf("blocked (%d): %s", resp.StatusCode, errMsg)
 		}
@@ -264,12 +264,13 @@ func (p *Proxy) codexRateLimitHTTPClient() *http.Client {
 	if p != nil && p.httpClient != nil {
 		client.Transport = p.httpClient.Transport
 	}
-	if p == nil || p.config == nil {
+	cfg := p.configSnapshot()
+	if cfg == nil {
 		return client
 	}
 
-	proxyCfg := p.config.GetProxy()
-	codexProxyCfg := p.config.GetCodexProxy()
+	proxyCfg := cfg.GetProxy()
+	codexProxyCfg := cfg.GetCodexProxy()
 	proxyURL := ""
 	if codexProxyCfg != nil && strings.TrimSpace(codexProxyCfg.URL) != "" {
 		proxyURL = codexProxyCfg.URL
@@ -281,11 +282,11 @@ func (p *Proxy) codexRateLimitHTTPClient() *http.Client {
 	}
 	transport, err := CreateProxyTransport(proxyURL)
 	if err != nil {
-		logger.Warn("Failed to create proxy transport for rate limits: %v", err)
+		logger.Warn("Failed to create proxy transport for rate limits: %s", redactKnownSecrets(err.Error(), urlSecrets(proxyURL)...))
 		return client
 	}
 	client.Transport = transport
-	logger.Debug("Using proxy for rate limits: %s", proxyURL)
+	logger.Debug("Using proxy for rate limits: %s", redactURLForLog(proxyURL))
 	return client
 }
 

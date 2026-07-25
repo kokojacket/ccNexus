@@ -1,147 +1,159 @@
 import { api } from '../api.js';
 import { notifications } from '../utils/notifications.js';
-import { formatNumber, formatTokens } from '../utils/formatters.js';
+import { escapeHtml, formatNumber, formatTokens } from '../utils/formatters.js';
 import { t } from '../utils/i18n.js';
 
 class Stats {
     constructor() {
-        this.container = document.getElementById('view-container');
-        // 监听语言切换
-        window.addEventListener('languageChanged', () => {
-            if (state.get('currentView') === 'stats') {
-                this.render();
-            }
-        });
+        this.container = document.getElementById('statistics-panel');
+        this.period = 'daily';
+        this.requestVersion = 0;
+        window.addEventListener('languageChanged', () => this.render());
     }
 
     async render() {
         this.container.innerHTML = `
-            <div class="stats">
-                <h1>${t('stats.title')}</h1>
-
-                <div class="flex gap-2 mt-3 mb-3">
-                    <button class="btn btn-sm btn-primary period-btn active" data-period="daily">${t('stats.daily')}</button>
-                    <button class="btn btn-sm btn-secondary period-btn" data-period="weekly">${t('stats.weekly')}</button>
-                    <button class="btn btn-sm btn-secondary period-btn" data-period="monthly">${t('stats.monthly')}</button>
+            <div class="section-header">
+                <h2><span aria-hidden="true">📊</span> ${t('stats.title')}</h2>
+                <div class="stats-tabs" role="group" aria-label="${t('stats.title')}">
+                    <button class="stats-tab-btn" type="button" data-period="daily">${t('stats.daily')}</button>
+                    <button class="stats-tab-btn" type="button" data-period="weekly">${t('stats.weekly')}</button>
+                    <button class="stats-tab-btn" type="button" data-period="monthly">${t('stats.monthly')}</button>
                 </div>
-
-                <div id="stats-content"></div>
             </div>
-        `;
+            <div id="stats-content"></div>`;
 
-        document.querySelectorAll('.period-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                document.querySelectorAll('.period-btn').forEach(b => {
-                    b.classList.remove('btn-primary', 'active');
-                    b.classList.add('btn-secondary');
-                });
-                btn.classList.remove('btn-secondary');
-                btn.classList.add('btn-primary', 'active');
-                this.loadStats(btn.dataset.period);
+        this.updatePeriodButtons();
+        this.container.querySelectorAll('.stats-tab-btn').forEach(button => {
+            button.addEventListener('click', () => {
+                this.period = button.dataset.period;
+                this.updatePeriodButtons();
+                this.loadStats(this.period);
             });
         });
-
-        await this.loadStats('daily');
+        await this.loadStats(this.period);
     }
 
-    async loadStats(period) {
+    async loadStats(period, showLoading = true) {
+        this.period = period;
+        const requestVersion = ++this.requestVersion;
+        if (showLoading) {
+            this.renderLoading();
+        }
         try {
-            let data;
-            switch (period) {
-                case 'daily':
-                    data = await api.getStatsDaily();
-                    break;
-                case 'weekly':
-                    data = await api.getStatsWeekly();
-                    break;
-                case 'monthly':
-                    data = await api.getStatsMonthly();
-                    break;
+            const statsRequest = period === 'weekly'
+                ? api.getStatsWeekly()
+                : period === 'monthly'
+                    ? api.getStatsMonthly()
+                    : api.getStatsDaily();
+            const [data, endpointData] = await Promise.all([statsRequest, api.getEndpoints()]);
+            if (requestVersion !== this.requestVersion) {
+                return;
             }
-
-            this.renderStats(data);
+            this.renderStats(data, endpointData.endpoints || []);
         } catch (error) {
-            notifications.error(`${t('stats.failedToLoad')}: ${error.message}`);
+            if (requestVersion === this.requestVersion) {
+                this.renderError(error.message);
+                notifications.error(`${t('stats.failedToLoad')}: ${error.message}`);
+            }
         }
     }
 
-    renderStats(data) {
+    async refreshRealtime() {
+        await this.loadStats(this.period, false);
+    }
+
+    updatePeriodButtons() {
+        this.container.querySelectorAll('.stats-tab-btn').forEach(button => {
+            const active = button.dataset.period === this.period;
+            button.classList.toggle('active', active);
+            button.setAttribute('aria-pressed', String(active));
+        });
+    }
+
+    renderLoading() {
+        const container = document.getElementById('stats-content');
+        if (container) {
+            container.innerHTML = `<div class="loading-state"><div class="spinner" aria-hidden="true"></div><span>${t('common.loading')}</span></div>`;
+        }
+    }
+
+    renderError(message) {
+        const container = document.getElementById('stats-content');
+        if (container) {
+            container.innerHTML = '<div class="inline-alert error" id="stats-error"></div>';
+            container.querySelector('#stats-error').textContent = `${t('stats.failedToLoad')}: ${message}`;
+        }
+    }
+
+    renderStats(data, endpoints) {
         const stats = data.stats || {};
         const container = document.getElementById('stats-content');
+        if (!container) {
+            return;
+        }
+        const activeEndpoints = endpoints.filter(endpoint => endpoint.enabled).length;
+        const totalRequests = stats.totalRequests || 0;
+        const totalSuccess = stats.totalSuccess || 0;
+        const totalErrors = stats.totalErrors || 0;
+        const inputTokens = stats.totalInputTokens || 0;
+        const outputTokens = stats.totalOutputTokens || 0;
 
         container.innerHTML = `
-            <div class="grid grid-cols-4 mb-4">
-                <div class="stat-card">
+            <div class="stats-grid">
+                <div class="stat-box">
+                    <div class="stat-label">${t('stats.endpoints')}</div>
+                    <div class="stat-value"><span>${formatNumber(activeEndpoints)}</span><span class="stat-secondary"> / ${formatNumber(endpoints.length)}</span></div>
+                    <div class="stat-detail">${t('stats.activeTotal')}</div>
+                </div>
+                <div class="stat-box">
                     <div class="stat-label">${t('stats.totalRequests')}</div>
-                    <div class="stat-value">${formatNumber(stats.totalRequests || 0)}</div>
+                    <div class="stat-value">${formatNumber(totalRequests)}</div>
+                    <div class="stat-detail">${formatNumber(totalSuccess)} ${t('stats.successful')} / ${formatNumber(totalErrors)} ${t('stats.errors')}</div>
                 </div>
-                <div class="stat-card">
-                    <div class="stat-label">${t('stats.successful')}</div>
-                    <div class="stat-value">${formatNumber(stats.totalSuccess || 0)}</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">${t('stats.errors')}</div>
-                    <div class="stat-value">${formatNumber(stats.totalErrors || 0)}</div>
-                </div>
-                <div class="stat-card">
+                <div class="stat-box">
                     <div class="stat-label">${t('stats.totalTokens')}</div>
-                    <div class="stat-value">${formatTokens((stats.totalInputTokens || 0) + (stats.totalOutputTokens || 0))}</div>
+                    <div class="stat-value">${formatTokens(inputTokens + outputTokens)}</div>
+                    <div class="stat-detail">${formatTokens(inputTokens)} ${t('stats.input')} / ${formatTokens(outputTokens)} ${t('stats.output')}</div>
                 </div>
             </div>
-
-            <div class="card">
-                <div class="card-header">
-                    <h3 class="card-title">${t('stats.endpointBreakdown')}</h3>
-                </div>
-                <div class="card-body">
-                    ${this.renderEndpointTable(stats.endpoints || {})}
-                </div>
-            </div>
-        `;
+            <details class="stats-details">
+                <summary>${t('stats.endpointBreakdown')}</summary>
+                ${this.renderEndpointTable(stats.endpoints || {})}
+            </details>`;
     }
 
     renderEndpointTable(endpoints) {
         const endpointNames = Object.keys(endpoints);
-
         if (endpointNames.length === 0) {
-            return `<div class="empty-state"><p>${t('stats.noDataAvailable')}</p></div>`;
+            return `<div class="empty-state compact"><p>${t('stats.noDataAvailable')}</p></div>`;
         }
-
         return `
-            <div class="table-container">
+            <div class="table-container table-responsive">
                 <table class="table">
-                    <thead>
-                        <tr>
-                            <th>${t('stats.endpoint')}</th>
-                            <th>${t('stats.requests')}</th>
-                            <th>${t('stats.errors')}</th>
-                            <th>${t('stats.inputTokens')}</th>
-                            <th>${t('stats.outputTokens')}</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${endpointNames.map(name => {
-                            const ep = endpoints[name];
-                            return `
-                                <tr>
-                                    <td><strong>${this.escapeHtml(name)}</strong></td>
-                                    <td>${formatNumber(ep.requests || 0)}</td>
-                                    <td>${formatNumber(ep.errors || 0)}</td>
-                                    <td>${formatTokens(ep.inputTokens || 0)}</td>
-                                    <td>${formatTokens(ep.outputTokens || 0)}</td>
-                                </tr>
-                            `;
-                        }).join('')}
-                    </tbody>
+                    <thead><tr>
+                        <th>${t('stats.endpoint')}</th>
+                        <th>${t('stats.requests')}</th>
+                        <th>${t('stats.errors')}</th>
+                        <th>${t('stats.inputTokens')}</th>
+                        <th>${t('stats.outputTokens')}</th>
+                    </tr></thead>
+                    <tbody>${endpointNames.map(name => {
+                        const endpoint = endpoints[name];
+                        return `<tr>
+                            <td data-label="${t('stats.endpoint')}"><strong>${escapeHtml(name)}</strong></td>
+                            <td data-label="${t('stats.requests')}">${formatNumber(endpoint.requests || 0)}</td>
+                            <td data-label="${t('stats.errors')}">${formatNumber(endpoint.errors || 0)}</td>
+                            <td data-label="${t('stats.inputTokens')}">${formatTokens(endpoint.inputTokens || 0)}</td>
+                            <td data-label="${t('stats.outputTokens')}">${formatTokens(endpoint.outputTokens || 0)}</td>
+                        </tr>`;
+                    }).join('')}</tbody>
                 </table>
-            </div>
-        `;
+            </div>`;
     }
 
-    escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
+    destroy() {
+        this.requestVersion++;
     }
 }
 

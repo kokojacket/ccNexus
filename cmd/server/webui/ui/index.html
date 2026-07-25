@@ -1,64 +1,52 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ccNexus - Admin Dashboard</title>
+    <title>ccNexus</title>
     <link rel="stylesheet" href="/ui/css/main.css">
     <link rel="stylesheet" href="/ui/css/components.css">
     <link rel="stylesheet" href="/ui/css/themes.css">
 </head>
 <body>
+    <a class="skip-link" href="#content" data-i18n="common.skipToContent">跳到主要内容</a>
     <div id="app">
-        <nav id="sidebar">
-            <div class="sidebar-header">
-                <h1>ccNexus</h1>
-                <p class="subtitle" id="sidebar-subtitle">AI Proxy Admin</p>
+        <header class="app-header">
+            <div class="brand-block">
+                <h1><span aria-hidden="true">🚀</span> ccNexus</h1>
+                <p id="app-subtitle">AI 代理管理</p>
             </div>
-            <ul class="nav-menu">
-                <li><a href="#" data-view="dashboard" class="nav-link active">
-                    <span class="icon">📊</span>
-                    <span class="nav-label" data-i18n="common.dashboard">Dashboard</span>
-                </a></li>
-                <li><a href="#" data-view="endpoints" class="nav-link">
-                    <span class="icon">🔗</span>
-                    <span class="nav-label" data-i18n="common.endpoints">Endpoints</span>
-                </a></li>
-                <li><a href="#" data-view="stats" class="nav-link">
-                    <span class="icon">📈</span>
-                    <span class="nav-label" data-i18n="common.statistics">Statistics</span>
-                </a></li>
-                <li><a href="#" data-view="testing" class="nav-link">
-                    <span class="icon">🧪</span>
-                    <span class="nav-label" data-i18n="common.testing">Testing</span>
-                </a></li>
-            </ul>
-            <div class="sidebar-footer">
-                <button id="lang-toggle" class="btn-icon" title="切换语言 / Switch Language">
-                    <span class="icon">🌐</span>
+            <div class="header-actions">
+                <button class="port-display" id="port-settings-btn" type="button">
+                    <span id="port-label">端口</span>
+                    <span class="port-number" id="proxy-port">-</span>
                 </button>
-                <button id="theme-toggle" class="btn-icon" title="切换主题 / Toggle theme">
-                    <span class="icon">🌙</span>
+                <button class="header-link" id="lang-toggle" type="button" title="切换语言 / Switch Language" aria-label="切换语言 / Switch Language">
+                    <span aria-hidden="true">中</span>
+                </button>
+                <button class="header-link" id="theme-toggle" type="button" aria-label="切换主题">
+                    <span aria-hidden="true">◐</span>
+                </button>
+                <button class="header-link" id="settings-btn" type="button" aria-label="设置">
+                    <span aria-hidden="true">⚙</span>
                 </button>
             </div>
-        </nav>
-        <main id="content">
-            <div id="view-container">
-                <!-- Dynamic content will be loaded here -->
-            </div>
+        </header>
+
+        <main id="content" class="app-container" tabindex="-1">
+            <section class="card app-section" id="statistics-panel" aria-live="polite"></section>
+            <section class="card app-section" id="endpoints-panel" aria-live="polite"></section>
         </main>
+
+        <footer class="app-footer">
+            <span>© 2025 ccNexus</span>
+            <span class="footer-status" id="realtime-status"></span>
+            <span>Server WebUI</span>
+        </footer>
     </div>
 
-    <!-- Modal container -->
-    <div id="modal-container"></div>
-
-    <!-- Toast notifications -->
-    <div id="toast-container"></div>
-
-    <!-- Chart.js from CDN -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-
-    <!-- Application scripts -->
+    <div id="modal-container" aria-live="polite"></div>
+    <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
     <script type="module" src="/ui/js/main.js"></script>
 </body>
 </html>

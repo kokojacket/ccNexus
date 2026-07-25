@@ -63,7 +63,7 @@ func TestHandleStreamingResponseExtractsUsageFromOriginalEvent(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 
-	in, out, _ := p.handleStreamingResponse(
+	in, out, _, err := p.handleStreamingResponse(
 		rec,
 		resp,
 		endpoint,
@@ -74,6 +74,9 @@ func TestHandleStreamingResponseExtractsUsageFromOriginalEvent(t *testing.T) {
 		[]byte(`{}`),
 		0,
 	)
+	if err != nil {
+		t.Fatalf("expected completed stream, got error: %v", err)
+	}
 
 	if in != 7 || out != 5 {
 		t.Fatalf("expected tokens from original stream usage in=7 out=5, got in=%d out=%d", in, out)

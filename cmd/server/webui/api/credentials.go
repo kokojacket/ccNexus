@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,6 +33,85 @@ type importCredentialsRequest struct {
 	Remark    string                 `json:"remark"`
 }
 
+type credentialResponse struct {
+	ID              int64                         `json:"id"`
+	EndpointName    string                        `json:"endpointName"`
+	ProviderType    string                        `json:"providerType"`
+	AccountID       string                        `json:"accountId,omitempty"`
+	Email           string                        `json:"email,omitempty"`
+	HasAccessToken  bool                          `json:"hasAccessToken"`
+	HasRefreshToken bool                          `json:"hasRefreshToken"`
+	HasIDToken      bool                          `json:"hasIdToken"`
+	LastRefresh     *time.Time                    `json:"lastRefresh,omitempty"`
+	ExpiresAt       *time.Time                    `json:"expiresAt,omitempty"`
+	Status          string                        `json:"status"`
+	Enabled         bool                          `json:"enabled"`
+	FailureCount    int                           `json:"failureCount"`
+	CooldownUntil   *time.Time                    `json:"cooldownUntil,omitempty"`
+	LastCheckedAt   *time.Time                    `json:"lastCheckedAt,omitempty"`
+	LastUsedAt      *time.Time                    `json:"lastUsedAt,omitempty"`
+	LastError       string                        `json:"lastError,omitempty"`
+	Remark          string                        `json:"remark,omitempty"`
+	RateLimits      *storage.CredentialRateLimits `json:"rateLimits,omitempty"`
+	Usage           *storage.CredentialUsage      `json:"usage,omitempty"`
+	CreatedAt       time.Time                     `json:"createdAt"`
+	UpdatedAt       time.Time                     `json:"updatedAt"`
+}
+
+type updateCredentialRequest struct {
+	AccessToken       *string `json:"accessToken"`
+	RefreshToken      *string `json:"refreshToken"`
+	IDToken           *string `json:"idToken"`
+	ClearAccessToken  bool    `json:"clearAccessToken"`
+	ClearRefreshToken bool    `json:"clearRefreshToken"`
+	ClearIDToken      bool    `json:"clearIdToken"`
+	Remark            *string `json:"remark"`
+	Enabled           *bool   `json:"enabled"`
+	ExpiresAt         *string `json:"expiresAt"`
+	LastRefresh       *string `json:"lastRefresh"`
+	Status            *string `json:"status"`
+}
+
+func newCredentialResponse(credential storage.EndpointCredential) credentialResponse {
+	rateLimits := credential.RateLimits
+	if rateLimits != nil {
+		copy := *rateLimits
+		copy.Error = redactCredentialSecrets(copy.Error, credential)
+		rateLimits = &copy
+	}
+	return credentialResponse{
+		ID:              credential.ID,
+		EndpointName:    credential.EndpointName,
+		ProviderType:    credential.ProviderType,
+		AccountID:       credential.AccountID,
+		Email:           credential.Email,
+		HasAccessToken:  strings.TrimSpace(credential.AccessToken) != "",
+		HasRefreshToken: strings.TrimSpace(credential.RefreshToken) != "",
+		HasIDToken:      strings.TrimSpace(credential.IDToken) != "",
+		LastRefresh:     credential.LastRefresh,
+		ExpiresAt:       credential.ExpiresAt,
+		Status:          credential.Status,
+		Enabled:         credential.Enabled,
+		FailureCount:    credential.FailureCount,
+		CooldownUntil:   credential.CooldownUntil,
+		LastCheckedAt:   credential.LastCheckedAt,
+		LastUsedAt:      credential.LastUsedAt,
+		LastError:       redactCredentialSecrets(credential.LastError, credential),
+		Remark:          credential.Remark,
+		RateLimits:      rateLimits,
+		Usage:           credential.Usage,
+		CreatedAt:       credential.CreatedAt,
+		UpdatedAt:       credential.UpdatedAt,
+	}
+}
+
+func redactCredentialSecrets(message string, credential storage.EndpointCredential) string {
+	for _, secret := range []string{credential.AccessToken, credential.RefreshToken, credential.IDToken} {
+		message = redactAPIKey(message, secret)
+	}
+	return message
+}
+
 func (h *Handler) handleEndpointCredentials(w http.ResponseWriter, r *http.Request, endpointName string, parts []string) {
 	endpoint, err := h.getEndpointByName(endpointName)
 	if err != nil {
@@ -45,6 +125,10 @@ func (h *Handler) handleEndpointCredentials(w http.ResponseWriter, r *http.Reque
 	}
 
 	if len(parts) == 0 || parts[0] == "" {
+		if len(parts) > 1 {
+			http.NotFound(w, r)
+			return
+		}
 		switch r.Method {
 		case http.MethodGet:
 			h.listEndpointCredentials(w, r, endpointName)
@@ -53,6 +137,10 @@ func (h *Handler) handleEndpointCredentials(w http.ResponseWriter, r *http.Reque
 		default:
 			WriteError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		}
+		return
+	}
+	if len(parts) != 1 {
+		http.NotFound(w, r)
 		return
 	}
 
@@ -107,19 +195,18 @@ func (h *Handler) listEndpointCredentials(w http.ResponseWriter, r *http.Request
 		logger.Warn("Failed to get credential stats: %v", err)
 	}
 
+	responseCredentials := make([]credentialResponse, len(credentials))
 	for i := range credentials {
-		credentials[i].AccessToken = maskToken(credentials[i].AccessToken)
-		credentials[i].RefreshToken = maskToken(credentials[i].RefreshToken)
-		credentials[i].IDToken = maskToken(credentials[i].IDToken)
 		if rateLimits != nil {
 			if entry, ok := rateLimits[credentials[i].ID]; ok {
 				credentials[i].RateLimits = entry
 			}
 		}
+		responseCredentials[i] = newCredentialResponse(credentials[i])
 	}
 
 	WriteSuccess(w, map[string]interface{}{
-		"credentials": credentials,
+		"credentials": responseCredentials,
 		"stats":       stats,
 	})
 }
@@ -269,16 +356,7 @@ func (h *Handler) importEndpointCredentials(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *Handler) updateEndpointCredential(w http.ResponseWriter, r *http.Request, endpointName string, id int64) {
-	var req struct {
-		AccessToken  *string `json:"accessToken"`
-		RefreshToken *string `json:"refreshToken"`
-		IDToken      *string `json:"idToken"`
-		Remark       *string `json:"remark"`
-		Enabled      *bool   `json:"enabled"`
-		ExpiresAt    *string `json:"expiresAt"`
-		LastRefresh  *string `json:"lastRefresh"`
-		Status       *string `json:"status"`
-	}
+	var req updateCredentialRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		WriteError(w, http.StatusBadRequest, "Invalid request body")
@@ -296,19 +374,25 @@ func (h *Handler) updateEndpointCredential(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if req.AccessToken != nil {
+	if req.ClearAccessToken {
+		WriteError(w, http.StatusBadRequest, "accessToken cannot be cleared")
+		return
+	}
+	if req.AccessToken != nil && strings.TrimSpace(*req.AccessToken) != "" {
 		token := strings.TrimSpace(*req.AccessToken)
-		if token == "" {
-			WriteError(w, http.StatusBadRequest, "accessToken cannot be empty")
-			return
-		}
 		cred.AccessToken = token
 	}
-	if req.RefreshToken != nil {
+	if req.RefreshToken != nil && strings.TrimSpace(*req.RefreshToken) != "" {
 		cred.RefreshToken = strings.TrimSpace(*req.RefreshToken)
 	}
-	if req.IDToken != nil {
+	if req.IDToken != nil && strings.TrimSpace(*req.IDToken) != "" {
 		cred.IDToken = strings.TrimSpace(*req.IDToken)
+	}
+	if req.ClearRefreshToken {
+		cred.RefreshToken = ""
+	}
+	if req.ClearIDToken {
+		cred.IDToken = ""
 	}
 	if req.Remark != nil {
 		cred.Remark = strings.TrimSpace(*req.Remark)
@@ -339,6 +423,16 @@ func (h *Handler) updateEndpointCredential(w http.ResponseWriter, r *http.Reques
 				WriteError(w, http.StatusBadRequest, "invalid status")
 				return
 			}
+			if status == "active" {
+				if cred.ExpiresAt != nil && !time.Now().UTC().Before(cred.ExpiresAt.UTC()) {
+					WriteError(w, http.StatusBadRequest, "expired credential requires a new token")
+					return
+				}
+				cred.Enabled = true
+				cred.FailureCount = 0
+				cred.CooldownUntil = nil
+				cred.LastError = ""
+			}
 			cred.Status = status
 		}
 	}
@@ -359,14 +453,30 @@ func (h *Handler) updateEndpointCredential(w http.ResponseWriter, r *http.Reques
 		WriteError(w, http.StatusNotFound, "Credential not found")
 		return
 	}
-	updated.AccessToken = maskToken(updated.AccessToken)
-	updated.RefreshToken = maskToken(updated.RefreshToken)
-	updated.IDToken = maskToken(updated.IDToken)
-	WriteSuccess(w, updated)
+	updated.RateLimits, _ = h.storage.GetCredentialRateLimits(id)
+	if usage, usageErr := h.storage.GetCredentialUsageByEndpoint(endpointName); usageErr == nil {
+		updated.Usage = usage[id]
+	}
+	WriteSuccess(w, newCredentialResponse(*updated))
 }
 
 func (h *Handler) deleteEndpointCredential(w http.ResponseWriter, r *http.Request, endpointName string, id int64) {
+	credential, err := h.storage.GetCredentialByID(id)
+	if err != nil {
+		logger.Error("Failed to get credential: %v", err)
+		WriteError(w, http.StatusInternalServerError, "Failed to get credential")
+		return
+	}
+	if credential == nil || credential.EndpointName != endpointName {
+		WriteError(w, http.StatusNotFound, "Credential not found")
+		return
+	}
+
 	if err := h.storage.DeleteEndpointCredential(endpointName, id); err != nil {
+		if errors.Is(err, storage.ErrCredentialNotFound) {
+			WriteError(w, http.StatusNotFound, "Credential not found")
+			return
+		}
 		logger.Error("Failed to delete credential: %v", err)
 		WriteError(w, http.StatusInternalServerError, "Failed to delete credential")
 		return
@@ -454,15 +564,4 @@ func isAllowedCredentialStatus(status string) bool {
 	default:
 		return false
 	}
-}
-
-func maskToken(token string) string {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return ""
-	}
-	if len(token) <= 10 {
-		return "****"
-	}
-	return token[:6] + "..." + token[len(token)-4:]
 }

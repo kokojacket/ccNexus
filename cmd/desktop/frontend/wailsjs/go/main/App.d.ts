@@ -199,6 +199,8 @@ export function TestEndpoint(arg1:number):Promise<string>;
 
 export function TestEndpointLight(arg1:number):Promise<string>;
 
+export function TestEndpointLightWithModel(arg1:number,arg2:string):Promise<string>;
+
 export function TestS3Connection(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string,arg6:string,arg7:string,arg8:boolean,arg9:boolean):Promise<string>;
 
 export function TestWebDAVConnection(arg1:string,arg2:string,arg3:string):Promise<string>;

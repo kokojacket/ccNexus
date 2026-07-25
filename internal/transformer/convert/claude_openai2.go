@@ -70,14 +70,7 @@ func ClaudeReqToOpenAI2(claudeReq []byte, model string) ([]byte, error) {
 		if mapped := mapClaudeToolChoiceToOpenAI2(req.ToolChoice); mapped != nil {
 			openai2Req["tool_choice"] = mapped
 		} else {
-			// For first turn, prefer required to avoid "plan-only" responses.
-			// After at least one tool_result exists, switch to auto to prevent
-			// forced repeated tool calls in later turns.
-			if hasClaudeToolResult(req.Messages) {
-				openai2Req["tool_choice"] = "auto"
-			} else {
-				openai2Req["tool_choice"] = "required"
-			}
+			openai2Req["tool_choice"] = "auto"
 		}
 	}
 
@@ -117,25 +110,6 @@ func mapClaudeToolChoiceToOpenAI2(toolChoice interface{}) interface{} {
 	}
 
 	return nil
-}
-
-func hasClaudeToolResult(messages []transformer.ClaudeMessage) bool {
-	for _, msg := range messages {
-		blocks, ok := msg.Content.([]interface{})
-		if !ok {
-			continue
-		}
-		for _, block := range blocks {
-			m, ok := block.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			if t, _ := m["type"].(string); t == "tool_result" {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // OpenAI2ReqToClaude converts OpenAI Responses API request to Claude request
@@ -335,6 +309,127 @@ func ClaudeStreamToOpenAI2(event []byte, ctx *transformer.StreamContext) ([]byte
 		d, _ := json.Marshal(evt)
 		result.WriteString(fmt.Sprintf("data: %s\n\n", d))
 	}
+	finishText := func() {
+		if !ctx.ContentBlockStarted {
+			return
+		}
+		itemID := fmt.Sprintf("msg_%s_%d", ctx.MessageID, ctx.ContentIndex)
+		part := map[string]interface{}{
+			"type": "output_text", "text": ctx.OutputText, "annotations": []interface{}{},
+		}
+		writeEvent(map[string]interface{}{
+			"type": "response.output_text.done", "item_id": itemID,
+			"output_index": ctx.ContentIndex, "content_index": 0, "text": ctx.OutputText,
+		})
+		writeEvent(map[string]interface{}{
+			"type": "response.content_part.done", "item_id": itemID,
+			"output_index": ctx.ContentIndex, "content_index": 0, "part": part,
+		})
+		writeEvent(map[string]interface{}{
+			"type": "response.output_item.done", "output_index": ctx.ContentIndex,
+			"item": map[string]interface{}{
+				"type": "message", "id": itemID, "role": "assistant", "status": "completed",
+				"content": []interface{}{part},
+			},
+		})
+		ctx.ContentBlockStarted = false
+		ctx.OutputText = ""
+	}
+	finishThinking := func() {
+		if !ctx.ThinkingBlockStarted {
+			return
+		}
+		itemID := fmt.Sprintf("rs_%s_%d", ctx.MessageID, ctx.ThinkingIndex)
+		part := map[string]interface{}{
+			"type": "summary_text", "text": ctx.PendingThinkingText,
+		}
+		writeEvent(map[string]interface{}{
+			"type": "response.reasoning_summary_text.done", "item_id": itemID,
+			"output_index": ctx.ThinkingIndex, "summary_index": 0, "text": ctx.PendingThinkingText,
+		})
+		writeEvent(map[string]interface{}{
+			"type": "response.reasoning_summary_part.done", "item_id": itemID,
+			"output_index": ctx.ThinkingIndex, "summary_index": 0, "part": part,
+		})
+		writeEvent(map[string]interface{}{
+			"type": "response.output_item.done", "output_index": ctx.ThinkingIndex,
+			"item": map[string]interface{}{
+				"type": "reasoning", "id": itemID, "status": "completed",
+				"summary": []interface{}{part},
+			},
+		})
+		ctx.ThinkingBlockStarted = false
+		ctx.PendingThinkingText = ""
+	}
+	startText := func() {
+		if ctx.ContentBlockStarted {
+			return
+		}
+		ctx.ContentIndex = ctx.NextOutputIndex
+		ctx.NextOutputIndex++
+		ctx.ContentBlockStarted = true
+		ctx.OutputText = ""
+		itemID := fmt.Sprintf("msg_%s_%d", ctx.MessageID, ctx.ContentIndex)
+		writeEvent(map[string]interface{}{
+			"type": "response.output_item.added", "output_index": ctx.ContentIndex,
+			"item": map[string]interface{}{
+				"type": "message", "id": itemID, "role": "assistant",
+				"status": "in_progress", "content": []interface{}{},
+			},
+		})
+		writeEvent(map[string]interface{}{
+			"type": "response.content_part.added", "item_id": itemID,
+			"output_index": ctx.ContentIndex, "content_index": 0,
+			"part": map[string]interface{}{
+				"type": "output_text", "text": "", "annotations": []interface{}{},
+			},
+		})
+	}
+	startThinking := func() {
+		if ctx.ThinkingBlockStarted {
+			return
+		}
+		ctx.ThinkingIndex = ctx.NextOutputIndex
+		ctx.NextOutputIndex++
+		ctx.ThinkingBlockStarted = true
+		ctx.PendingThinkingText = ""
+		itemID := fmt.Sprintf("rs_%s_%d", ctx.MessageID, ctx.ThinkingIndex)
+		writeEvent(map[string]interface{}{
+			"type": "response.output_item.added", "output_index": ctx.ThinkingIndex,
+			"item": map[string]interface{}{
+				"type": "reasoning", "id": itemID, "status": "in_progress", "summary": []interface{}{},
+			},
+		})
+		writeEvent(map[string]interface{}{
+			"type": "response.reasoning_summary_part.added", "item_id": itemID,
+			"output_index": ctx.ThinkingIndex, "summary_index": 0,
+			"part": map[string]interface{}{"type": "summary_text", "text": ""},
+		})
+	}
+	emitText := func(text string) {
+		if text == "" {
+			return
+		}
+		finishThinking()
+		startText()
+		ctx.OutputText += text
+		writeEvent(map[string]interface{}{
+			"type": "response.output_text.delta", "item_id": fmt.Sprintf("msg_%s_%d", ctx.MessageID, ctx.ContentIndex),
+			"output_index": ctx.ContentIndex, "content_index": 0, "delta": text,
+		})
+	}
+	emitThinking := func(text string) {
+		if text == "" {
+			return
+		}
+		finishText()
+		startThinking()
+		ctx.PendingThinkingText += text
+		writeEvent(map[string]interface{}{
+			"type": "response.reasoning_summary_text.delta", "item_id": fmt.Sprintf("rs_%s_%d", ctx.MessageID, ctx.ThinkingIndex),
+			"output_index": ctx.ThinkingIndex, "summary_index": 0, "delta": text,
+		})
+	}
 
 	switch eventType {
 	case "message_start":
@@ -346,6 +441,7 @@ func ClaudeStreamToOpenAI2(event []byte, ctx *transformer.StreamContext) ([]byte
 				}
 			}
 		}
+		ctx.NextOutputIndex = 0
 		writeEvent(map[string]interface{}{
 			"type": "response.created",
 			"response": map[string]interface{}{
@@ -358,34 +454,25 @@ func ClaudeStreamToOpenAI2(event []byte, ctx *transformer.StreamContext) ([]byte
 		if !ok {
 			return nil, nil
 		}
-		idx, _ := data["index"].(float64)
-		blockIdx := int(idx)
-
 		switch block["type"] {
 		case "text":
-			ctx.ContentBlockStarted = true
-			ctx.ContentIndex = blockIdx
-			// output_item.added
-			writeEvent(map[string]interface{}{
-				"type": "response.output_item.added", "output_index": blockIdx,
-				"item": map[string]interface{}{
-					"type": "message", "id": fmt.Sprintf("msg_%s_%d", ctx.MessageID, blockIdx),
-					"role": "assistant", "status": "in_progress", "content": []interface{}{},
-				},
-			})
-			// content_part.added
-			writeEvent(map[string]interface{}{
-				"type": "response.content_part.added", "output_index": blockIdx, "content_index": 0,
-				"part": map[string]interface{}{"type": "output_text", "text": ""},
-			})
+			if text, _ := block["text"].(string); text != "" {
+				emitText(text)
+			}
+		case "thinking":
+			if thinking, _ := block["thinking"].(string); thinking != "" {
+				emitThinking(thinking)
+			}
 		case "tool_use":
+			finishThinking()
+			finishText()
 			ctx.ToolBlockStarted = true
-			ctx.ToolIndex = blockIdx
+			ctx.ToolIndex = ctx.NextOutputIndex
+			ctx.NextOutputIndex++
 			ctx.CurrentToolID, _ = block["id"].(string)
 			ctx.CurrentToolName, _ = block["name"].(string)
-			// output_item.added for function_call
 			writeEvent(map[string]interface{}{
-				"type": "response.output_item.added", "output_index": blockIdx,
+				"type": "response.output_item.added", "output_index": ctx.ToolIndex,
 				"item": map[string]interface{}{
 					"type": "function_call", "id": ctx.CurrentToolID,
 					"call_id": ctx.CurrentToolID, "name": ctx.CurrentToolName,
@@ -401,12 +488,15 @@ func ClaudeStreamToOpenAI2(event []byte, ctx *transformer.StreamContext) ([]byte
 		}
 		switch delta["type"] {
 		case "text_delta":
-			writeEvent(map[string]interface{}{
-				"type": "response.output_text.delta", "output_index": ctx.ContentIndex,
-				"content_index": 0, "delta": delta["text"],
-			})
+			text, _ := delta["text"].(string)
+			content := ctx.ThinkingBuffer + text
+			ctx.ThinkingBuffer = ""
+			consumeThinkTaggedStream(content, ctx, emitText, emitThinking)
+		case "thinking_delta":
+			thinking, _ := delta["thinking"].(string)
+			emitThinking(thinking)
 		case "input_json_delta":
-			partial := delta["partial_json"].(string)
+			partial, _ := delta["partial_json"].(string)
 			ctx.ToolArguments += partial
 			writeEvent(map[string]interface{}{
 				"type":         "response.function_call_arguments.delta",
@@ -415,18 +505,13 @@ func ClaudeStreamToOpenAI2(event []byte, ctx *transformer.StreamContext) ([]byte
 		}
 
 	case "content_block_stop":
-		idx, _ := data["index"].(float64)
-		blockIdx := int(idx)
-
-		if ctx.ToolBlockStarted && blockIdx == ctx.ToolIndex {
-			// function_call_arguments.done
+		if ctx.ToolBlockStarted {
 			writeEvent(map[string]interface{}{
 				"type":         "response.function_call_arguments.done",
-				"output_index": blockIdx, "arguments": ctx.ToolArguments,
+				"output_index": ctx.ToolIndex, "arguments": ctx.ToolArguments,
 			})
-			// output_item.done for function_call
 			writeEvent(map[string]interface{}{
-				"type": "response.output_item.done", "output_index": blockIdx,
+				"type": "response.output_item.done", "output_index": ctx.ToolIndex,
 				"item": map[string]interface{}{
 					"type": "function_call", "id": ctx.CurrentToolID,
 					"call_id": ctx.CurrentToolID, "name": ctx.CurrentToolName,
@@ -435,25 +520,10 @@ func ClaudeStreamToOpenAI2(event []byte, ctx *transformer.StreamContext) ([]byte
 			})
 			ctx.ToolBlockStarted = false
 			ctx.ToolArguments = ""
-		} else if ctx.ContentBlockStarted && blockIdx == ctx.ContentIndex {
-			// output_text.done - need accumulated text, use empty for now
-			writeEvent(map[string]interface{}{
-				"type": "response.output_text.done", "output_index": blockIdx, "content_index": 0,
-			})
-			// content_part.done
-			writeEvent(map[string]interface{}{
-				"type": "response.content_part.done", "output_index": blockIdx, "content_index": 0,
-				"part": map[string]interface{}{"type": "output_text"},
-			})
-			// output_item.done
-			writeEvent(map[string]interface{}{
-				"type": "response.output_item.done", "output_index": blockIdx,
-				"item": map[string]interface{}{
-					"type": "message", "id": fmt.Sprintf("msg_%s_%d", ctx.MessageID, blockIdx),
-					"role": "assistant", "status": "completed",
-				},
-			})
-			ctx.ContentBlockStarted = false
+		} else {
+			flushThinkTaggedStream(ctx, emitText, emitThinking)
+			finishThinking()
+			finishText()
 		}
 
 	case "message_delta":
@@ -464,6 +534,9 @@ func ClaudeStreamToOpenAI2(event []byte, ctx *transformer.StreamContext) ([]byte
 		}
 
 	case "message_stop":
+		flushThinkTaggedStream(ctx, emitText, emitThinking)
+		finishThinking()
+		finishText()
 		writeEvent(map[string]interface{}{
 			"type": "response.completed",
 			"response": map[string]interface{}{

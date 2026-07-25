@@ -87,7 +87,8 @@ func (p *Proxy) refreshCredential(endpoint config.Endpoint, credential *storage.
 		return nil, fmt.Errorf("read refresh response failed: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("refresh failed (%d): %s", resp.StatusCode, truncateForLog(string(body), 2000))
+		bodyMessage := redactCredentialMessage(string(body), credential)
+		return nil, fmt.Errorf("refresh failed (%d): %s", resp.StatusCode, truncateForLog(bodyMessage, 2000))
 	}
 
 	var tokenResp codexRefreshTokenResponse
@@ -165,12 +166,13 @@ func (p *Proxy) codexRefreshHTTPClient() *http.Client {
 	if p != nil && p.httpClient != nil {
 		client.Transport = p.httpClient.Transport
 	}
-	if p == nil || p.config == nil {
+	cfg := p.configSnapshot()
+	if cfg == nil {
 		return client
 	}
 
-	proxyCfg := p.config.GetProxy()
-	codexProxyCfg := p.config.GetCodexProxy()
+	proxyCfg := cfg.GetProxy()
+	codexProxyCfg := cfg.GetCodexProxy()
 	proxyURL := ""
 	if codexProxyCfg != nil && strings.TrimSpace(codexProxyCfg.URL) != "" {
 		proxyURL = codexProxyCfg.URL
@@ -182,11 +184,11 @@ func (p *Proxy) codexRefreshHTTPClient() *http.Client {
 	}
 	transport, err := CreateProxyTransport(proxyURL)
 	if err != nil {
-		logger.Warn("Failed to create proxy transport for credential refresh: %v", err)
+		logger.Warn("Failed to create proxy transport for credential refresh: %s", redactKnownSecrets(err.Error(), urlSecrets(proxyURL)...))
 		return client
 	}
 	client.Transport = transport
-	logger.Debug("Using proxy for credential refresh: %s", proxyURL)
+	logger.Debug("Using proxy for credential refresh: %s", redactURLForLog(proxyURL))
 	return client
 }
 

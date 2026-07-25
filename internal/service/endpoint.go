@@ -648,6 +648,15 @@ func (e *EndpointService) TestEndpoint(index int) string {
 
 // TestEndpointLight tests endpoint availability with minimal token consumption
 func (e *EndpointService) TestEndpointLight(index int) string {
+	return e.testEndpointLight(index, "")
+}
+
+// TestEndpointLightWithModel tests an endpoint with a model used only for this request.
+func (e *EndpointService) TestEndpointLightWithModel(index int, model string) string {
+	return e.testEndpointLight(index, model)
+}
+
+func (e *EndpointService) testEndpointLight(index int, model string) string {
 	endpoints := e.config.GetEndpoints()
 
 	if index < 0 || index >= len(endpoints) {
@@ -655,6 +664,9 @@ func (e *EndpointService) TestEndpointLight(index int) string {
 	}
 
 	endpoint := endpoints[index]
+	if model = strings.TrimSpace(model); model != "" {
+		endpoint.Model = model
+	}
 	logger.Info("Testing endpoint (light): %s (%s)", endpoint.Name, endpoint.APIUrl)
 
 	apiKey, credential, err := e.resolveEndpointAuth(endpoint)

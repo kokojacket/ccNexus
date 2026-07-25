@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,8 +18,15 @@ import (
 	"github.com/lich0821/ccNexus/internal/transformer"
 )
 
+var (
+	errClientDisconnected = errors.New("client disconnected")
+	errEndpointSwitched   = errors.New("endpoint switched")
+)
+
 // handleStreamingResponse processes streaming SSE responses
-func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Response, endpoint config.Endpoint, trans transformer.Transformer, transformerName string, thinkingEnabled bool, modelName string, bodyBytes []byte, credentialID int64) (int, int, string) {
+func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Response, endpoint config.Endpoint, trans transformer.Transformer, transformerName string, thinkingEnabled bool, modelName string, bodyBytes []byte, credentialID int64) (int, int, string, error) {
+	defer resp.Body.Close()
+
 	// Copy response headers except Content-Length and Content-Encoding
 	for key, values := range resp.Header {
 		if key == "Content-Length" || key == "Content-Encoding" {
@@ -34,9 +43,7 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		logger.Error("[%s] ResponseWriter does not support flushing", endpoint.Name)
-		resp.Body.Close()
-		return 0, 0, ""
+		return 0, 0, "", fmt.Errorf("response writer does not support flushing")
 	}
 
 	// Handle gzip-encoded response body
@@ -44,9 +51,7 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 	if resp.Header.Get("Content-Encoding") == "gzip" {
 		gzipReader, err := gzip.NewReader(resp.Body)
 		if err != nil {
-			logger.Error("[%s] Failed to create gzip reader: %v", endpoint.Name, err)
-			resp.Body.Close()
-			return 0, 0, ""
+			return 0, 0, "", fmt.Errorf("create gzip reader: %w", err)
 		}
 		defer gzipReader.Close()
 		reader = gzipReader
@@ -77,20 +82,61 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 	var outputText strings.Builder
 	eventCount := 0
 	streamDone := false
+	responseCompleted := false
+	var streamErr error
+
+	forwardEvent := func(eventData []byte, eventNumber int) error {
+		logger.DebugLog("[%s] SSE Event #%d (Original): %d bytes", endpoint.Name, eventNumber, len(eventData))
+
+		p.captureCodexRateLimitsFromEvent(endpoint, credentialID, eventData)
+
+		// Extract usage from original upstream events first. Some transformers may
+		// not preserve usage fields in transformed events.
+		p.extractTokensFromEvent(eventData, &inputTokens, &outputTokens)
+
+		// Check if this is a message_stop event (token usage fallback).
+		if p.isMessageStopEvent(eventData) && outputTokens == 0 && outputText.Len() > 0 {
+			outputTokens = tokencount.EstimateOutputTokens(outputText.String())
+			logger.Debug("[%s] Token fallback before message_stop: estimated output_tokens=%d", endpoint.Name, outputTokens)
+			if streamCtx != nil {
+				streamCtx.OutputTokens = outputTokens
+			}
+		}
+
+		transformedEvent, err := p.transformStreamEvent(eventData, trans, transformerName, streamCtx)
+		if err != nil {
+			return fmt.Errorf("transform SSE event: %w", err)
+		}
+		if len(transformedEvent) == 0 {
+			return nil
+		}
+
+		logger.DebugLog("[%s] SSE Event #%d (Transformed): %d bytes", endpoint.Name, eventNumber, len(transformedEvent))
+		p.extractTokensFromEvent(transformedEvent, &inputTokens, &outputTokens)
+		p.extractTextFromEvent(transformedEvent, &outputText)
+
+		written, writeErr := w.Write(transformedEvent)
+		if writeErr == nil && written != len(transformedEvent) {
+			writeErr = io.ErrShortWrite
+		}
+		if writeErr != nil {
+			return fmt.Errorf("%w: %v", errClientDisconnected, writeErr)
+		}
+		if hasStreamEventType(transformedEvent, "response.completed") {
+			responseCompleted = true
+		}
+		flusher.Flush()
+		return nil
+	}
 
 	for scanner.Scan() && !streamDone {
 		line := scanner.Text()
 
-		if !p.isCurrentEndpoint(endpoint.Name) {
-			logger.Warn("[%s] Endpoint switched during streaming, terminating stream gracefully", endpoint.Name)
-			streamDone = true
-			break
-		}
-
-		if strings.Contains(line, "data: [DONE]") {
+		if strings.TrimSpace(line) == "data: [DONE]" {
 			streamDone = true
 
-			// Token Usage Fallback: Inject message_delta with estimated output_tokens before [DONE]
+			// Token usage fallback is internal accounting only. The proxy must not
+			// inject an Anthropic event into streams using another protocol.
 			if outputTokens == 0 && outputText.Len() > 0 {
 				outputTokens = tokencount.EstimateOutputTokens(outputText.String())
 				logger.Debug("[%s] Token fallback before [DONE]: estimated output_tokens=%d", endpoint.Name, outputTokens)
@@ -99,24 +145,13 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 				if streamCtx != nil {
 					streamCtx.OutputTokens = outputTokens
 				}
-
-				// Inject message_delta event with usage
-				deltaEvent := fmt.Sprintf("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":%d}}\n\n", outputTokens)
-				if _, writeErr := w.Write([]byte(deltaEvent)); writeErr == nil {
-					flusher.Flush()
-				}
 			}
 
 			buffer.WriteString(line + "\n")
-			eventData := buffer.Bytes()
-			logger.DebugLog("[%s] SSE Event #%d (Original): %s", endpoint.Name, eventCount+1, string(eventData))
-
-			transformedEvent, err := p.transformStreamEvent(eventData, trans, transformerName, streamCtx)
-			if err == nil && len(transformedEvent) > 0 {
-				logger.DebugLog("[%s] SSE Event #%d (Transformed): %s", endpoint.Name, eventCount+1, string(transformedEvent))
-				w.Write(transformedEvent)
-				flusher.Flush()
+			if err := forwardEvent(buffer.Bytes(), eventCount+1); err != nil {
+				streamErr = err
 			}
+			buffer.Reset()
 			break
 		}
 
@@ -124,81 +159,48 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 
 		if line == "" {
 			eventCount++
-			eventData := buffer.Bytes()
-			logger.DebugLog("[%s] SSE Event #%d (Original): %s", endpoint.Name, eventCount, string(eventData))
-
-			p.captureCodexRateLimitsFromEvent(endpoint, credentialID, eventData)
-
-			// Extract usage from original upstream events first. Some transformers may
-			// not preserve usage fields in transformed events.
-			p.extractTokensFromEvent(eventData, &inputTokens, &outputTokens)
-
-			// Check if this is a message_stop event (Token Usage Fallback)
-			isMessageStop := p.isMessageStopEvent(eventData)
-			if isMessageStop && outputTokens == 0 && outputText.Len() > 0 {
-				outputTokens = tokencount.EstimateOutputTokens(outputText.String())
-				logger.Debug("[%s] Token fallback before message_stop: estimated output_tokens=%d", endpoint.Name, outputTokens)
-
-				// Update stream context for transformer fallback
-				if streamCtx != nil {
-					streamCtx.OutputTokens = outputTokens
-				}
-
-				// Inject message_delta event with usage before message_stop
-				deltaEvent := fmt.Sprintf("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":%d}}\n\n", outputTokens)
-				if _, writeErr := w.Write([]byte(deltaEvent)); writeErr == nil {
-					flusher.Flush()
-				}
-			}
-
-			transformedEvent, err := p.transformStreamEvent(eventData, trans, transformerName, streamCtx)
-			if err != nil {
-				logger.Error("[%s] Failed to transform SSE event: %v", endpoint.Name, err)
-			} else if len(transformedEvent) > 0 {
-				logger.DebugLog("[%s] SSE Event #%d (Transformed): %s", endpoint.Name, eventCount, string(transformedEvent))
-
-				p.extractTokensFromEvent(transformedEvent, &inputTokens, &outputTokens)
-				p.extractTextFromEvent(transformedEvent, &outputText)
-
-				if _, writeErr := w.Write(transformedEvent); writeErr != nil {
-					// Client disconnected (broken pipe) is normal for cancelled requests
-					if strings.Contains(writeErr.Error(), "broken pipe") || strings.Contains(writeErr.Error(), "connection reset") {
-						logger.Debug("[%s] Client disconnected: %v", endpoint.Name, writeErr)
-					} else {
-						logger.Error("[%s] Failed to write transformed event: %v", endpoint.Name, writeErr)
-					}
-					streamDone = true
-					break
-				}
-				flusher.Flush()
+			if err := forwardEvent(buffer.Bytes(), eventCount); err != nil {
+				streamErr = err
+				break
 			}
 			buffer.Reset()
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		errMsg := err.Error()
-		// Check if it's an HTTP/2 stream error
-		if strings.Contains(errMsg, "stream error") || strings.Contains(errMsg, "INTERNAL_ERROR") {
-			requestSize := len(bodyBytes)
-			sizeStr := formatRequestSize(requestSize)
-			logger.Error("[%s] HTTP/2 stream error (Request size: %s / %d bytes): %v",
-				endpoint.Name, sizeStr, requestSize, err)
+	if scanErr := scanner.Err(); streamErr == nil && scanErr != nil {
+		streamErr = fmt.Errorf("scan SSE stream: %w", scanErr)
+		if !errors.Is(scanErr, context.Canceled) {
+			errMsg := scanErr.Error()
+			// Check if it's an HTTP/2 stream error.
+			if strings.Contains(errMsg, "stream error") || strings.Contains(errMsg, "INTERNAL_ERROR") {
+				requestSize := len(bodyBytes)
+				sizeStr := formatRequestSize(requestSize)
+				logger.Error("[%s] HTTP/2 stream error (Request size: %s / %d bytes): %v",
+					endpoint.Name, sizeStr, requestSize, scanErr)
 
-			// Provide context based on request size
-			if requestSize > 100*1024 { // > 100KB
-				logger.Warn("[%s] Large request detected (%s). Consider: 1) Reading fewer files at once, 2) Using smaller code sections, 3) Breaking task into smaller requests",
-					endpoint.Name, sizeStr)
+				// Provide context based on request size.
+				if requestSize > 100*1024 { // > 100KB
+					logger.Warn("[%s] Large request detected (%s). Consider: 1) Reading fewer files at once, 2) Using smaller code sections, 3) Breaking task into smaller requests",
+						endpoint.Name, sizeStr)
+				} else {
+					logger.Warn("[%s] This error may occur due to upstream server limitations or network issues.", endpoint.Name)
+				}
 			} else {
-				logger.Warn("[%s] This error may occur due to upstream server limitations or network issues.", endpoint.Name)
+				logger.Error("[%s] Scanner error: %v", endpoint.Name, scanErr)
 			}
-		} else {
-			logger.Error("[%s] Scanner error: %v", endpoint.Name, err)
 		}
 	}
 
-	resp.Body.Close()
-	return inputTokens, outputTokens, outputText.String()
+	if streamErr == nil && !streamDone && buffer.Len() > 0 {
+		buffer.WriteByte('\n')
+		eventCount++
+		streamErr = forwardEvent(buffer.Bytes(), eventCount)
+	}
+	if streamErr == nil && strings.HasPrefix(transformerName, "cx_resp_") && !responseCompleted {
+		streamErr = fmt.Errorf("stream closed before response.completed")
+	}
+
+	return inputTokens, outputTokens, outputText.String(), streamErr
 }
 
 // handleStreamingAsNonStreaming aggregates SSE and returns a single non-stream response.
@@ -448,6 +450,10 @@ func (p *Proxy) extractTextFromEvent(transformedEvent []byte, outputText *string
 
 // isMessageStopEvent checks if the event is a message_stop event
 func (p *Proxy) isMessageStopEvent(eventData []byte) bool {
+	return hasStreamEventType(eventData, "message_stop")
+}
+
+func hasStreamEventType(eventData []byte, want string) bool {
 	scanner := bufio.NewScanner(bytes.NewReader(eventData))
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -462,7 +468,7 @@ func (p *Proxy) isMessageStopEvent(eventData []byte) bool {
 		}
 
 		eventType, _ := event["type"].(string)
-		if eventType == "message_stop" {
+		if eventType == want {
 			return true
 		}
 	}

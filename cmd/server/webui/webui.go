@@ -5,10 +5,10 @@ import (
 	"io/fs"
 	"net/http"
 
+	"github.com/lich0821/ccNexus/cmd/server/webui/api"
 	"github.com/lich0821/ccNexus/internal/config"
 	"github.com/lich0821/ccNexus/internal/proxy"
 	"github.com/lich0821/ccNexus/internal/storage"
-	"github.com/lich0821/ccNexus/cmd/server/webui/api"
 )
 
 //go:embed ui
@@ -30,14 +30,9 @@ func New(cfg *config.Config, p *proxy.Proxy, storage *storage.SQLiteStorage) *We
 
 // RegisterRoutes registers all web UI routes to the provided mux
 func (w *WebUI) RegisterRoutes(mux *http.ServeMux) error {
-	mux.HandleFunc("/api/", w.apiHandler.ServeHTTP)
+	mux.Handle("/api/", api.CORSMiddleware(w.apiHandler))
 
-	authConfig := api.AuthConfig{
-		Enabled:  w.cfg.BasicAuthEnabled,
-		Username: w.cfg.BasicAuthUsername,
-		Password: w.cfg.BasicAuthPassword,
-	}
-	authMiddleware := api.BasicAuthMiddleware(authConfig)
+	authMiddleware := api.BasicAuthMiddleware(w.cfg)
 
 	uiSubFS, err := fs.Sub(uiFS, "ui")
 	if err != nil {

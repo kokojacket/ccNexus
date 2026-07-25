@@ -3,12 +3,21 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
 
 	"github.com/lich0821/ccNexus/internal/config"
 	"github.com/lich0821/ccNexus/internal/logger"
 	"github.com/lich0821/ccNexus/internal/tokencount"
 )
+
+type healthEndpoint struct {
+	Name        string `json:"name"`
+	APIURL      string `json:"apiUrl"`
+	AuthMode    string `json:"authMode,omitempty"`
+	Enabled     bool   `json:"enabled"`
+	Transformer string `json:"transformer,omitempty"`
+	Model       string `json:"model,omitempty"`
+	Remark      string `json:"remark,omitempty"`
+}
 
 // handleHealth handles health check requests
 func (p *Proxy) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -17,31 +26,26 @@ func (p *Proxy) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	endpoints := p.getEnabledEndpoints()
 
-	// Mask API keys before sending response to prevent security leak
-	maskedEndpoints := make([]config.Endpoint, len(endpoints))
+	safeEndpoints := make([]healthEndpoint, len(endpoints))
 	for i, ep := range endpoints {
-		maskedEndpoints[i] = ep
-		maskedEndpoints[i].APIKey = maskAPIKey(ep.APIKey)
+		safeEndpoints[i] = healthEndpoint{
+			Name:        ep.Name,
+			APIURL:      redactURLForLog(ep.APIUrl),
+			AuthMode:    ep.AuthMode,
+			Enabled:     ep.Enabled,
+			Transformer: ep.Transformer,
+			Model:       ep.Model,
+			Remark:      ep.Remark,
+		}
 	}
 
 	response := map[string]interface{}{
 		"status":            "healthy",
 		"enabled_endpoints": len(endpoints),
-		"endpoints":         maskedEndpoints,
+		"endpoints":         safeEndpoints,
 	}
 
 	json.NewEncoder(w).Encode(response)
-}
-
-// maskAPIKey masks an API key for security, showing only first 4 and last 4 characters
-func maskAPIKey(key string) string {
-	if key == "" {
-		return ""
-	}
-	if len(key) <= 8 {
-		return "****"
-	}
-	return key[:4] + strings.Repeat("*", len(key)-8) + key[len(key)-4:]
 }
 
 // handleStats handles statistics requests
@@ -132,7 +136,7 @@ func (p *Proxy) UpdateConfig(cfg *config.Config) error {
 	// Save current endpoint name
 	var currentEndpointName string
 	if p.config != nil {
-		endpoints := p.getEnabledEndpoints()
+		endpoints := p.getEnabledEndpointsLocked()
 		if len(endpoints) > 0 && p.currentIndex < len(endpoints) {
 			currentEndpointName = endpoints[p.currentIndex].Name
 		}
@@ -141,7 +145,7 @@ func (p *Proxy) UpdateConfig(cfg *config.Config) error {
 	p.config = cfg
 
 	// Try to find the previous current endpoint in new config
-	newEndpoints := p.getEnabledEndpoints()
+	newEndpoints := p.getEnabledEndpointsLocked()
 	if currentEndpointName != "" && len(newEndpoints) > 0 {
 		found := false
 		for i, ep := range newEndpoints {

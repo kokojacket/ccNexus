@@ -4,11 +4,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/lich0821/ccNexus/internal/logger"
-	"github.com/lich0821/ccNexus/internal/storage"
 )
+
+var errBasicAuthCredentialsRequired = errors.New("username and password are required when Basic Auth is enabled")
 
 type BasicAuthConfigRequest struct {
 	Enabled  bool   `json:"enabled"`
@@ -31,10 +35,11 @@ func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleBasicAuthConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		enabled, username, password := h.config.GetBasicAuth()
 		WriteSuccess(w, map[string]interface{}{
-			"enabled":  h.config.BasicAuthEnabled,
-			"username": h.config.BasicAuthUsername,
-			"password": "***",
+			"enabled":     enabled,
+			"username":    username,
+			"hasPassword": password != "",
 		})
 	case http.MethodPut:
 		var req BasicAuthConfigRequest
@@ -43,25 +48,20 @@ func (h *Handler) handleBasicAuthConfig(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
-		h.config.BasicAuthEnabled = req.Enabled
-		if req.Username != "" {
-			h.config.BasicAuthUsername = req.Username
-		}
-		if req.Password != "" && req.Password != "***" {
-			h.config.BasicAuthPassword = req.Password
-		}
-
-		adapter := storage.NewConfigStorageAdapter(h.storage)
-		if err := h.config.SaveToStorage(adapter); err != nil {
+		if err := h.persistBasicAuth(&req.Enabled, req.Username, req.Password); err != nil {
+			if errors.Is(err, errBasicAuthCredentialsRequired) {
+				WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			logger.Error("Failed to save config: %v", err)
 			WriteError(w, http.StatusInternalServerError, "Failed to save configuration")
 			return
 		}
 
 		WriteSuccess(w, map[string]interface{}{
-			"message": "Basic Auth configuration updated",
-			"enabled":  h.config.BasicAuthEnabled,
-			"username": h.config.BasicAuthUsername,
+			"message":  "Basic Auth configuration updated",
+			"enabled":  h.config.GetBasicAuthEnabled(),
+			"username": h.config.GetBasicAuthUsername(),
 		})
 	default:
 		WriteError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -81,10 +81,7 @@ func (h *Handler) handleResetBasicAuthPassword(w http.ResponseWriter, r *http.Re
 	}
 	newPassword := hex.EncodeToString(bytes)[:16]
 
-	h.config.BasicAuthPassword = newPassword
-
-	adapter := storage.NewConfigStorageAdapter(h.storage)
-	if err := h.config.SaveToStorage(adapter); err != nil {
+	if err := h.persistBasicAuth(nil, "", newPassword); err != nil {
 		logger.Error("Failed to save config: %v", err)
 		WriteError(w, http.StatusInternalServerError, "Failed to save configuration")
 		return
@@ -109,8 +106,8 @@ func (h *Handler) getConfig(w http.ResponseWriter, r *http.Request) {
 // updateConfig updates the full configuration
 func (h *Handler) updateConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Port     int `json:"port"`
-		LogLevel int `json:"logLevel"`
+		Port     *int `json:"port"`
+		LogLevel *int `json:"logLevel"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -118,22 +115,29 @@ func (h *Handler) updateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update port if provided
-	if req.Port > 0 {
-		h.config.UpdatePort(req.Port)
+	if req.Port != nil {
+		if h.config.IsPortLocked() {
+			WriteError(w, http.StatusForbidden, "Port is locked by CLI flag and cannot be changed")
+			return
+		}
+		if *req.Port < 1 || *req.Port > 65535 {
+			WriteError(w, http.StatusBadRequest, "Invalid port number")
+			return
+		}
+	}
+	if req.LogLevel != nil && (*req.LogLevel < 0 || *req.LogLevel > 3) {
+		WriteError(w, http.StatusBadRequest, "Invalid log level (must be 0-3)")
+		return
 	}
 
-	// Update log level if provided
-	if req.LogLevel >= 0 {
-		h.config.UpdateLogLevel(req.LogLevel)
-	}
-
-	// Save to storage
-	adapter := storage.NewConfigStorageAdapter(h.storage)
-	if err := h.config.SaveToStorage(adapter); err != nil {
+	if err := h.persistRuntimeConfig(req.Port, req.LogLevel); err != nil {
 		logger.Error("Failed to save config: %v", err)
 		WriteError(w, http.StatusInternalServerError, "Failed to save configuration")
 		return
+	}
+	if req.LogLevel != nil {
+		logger.GetLogger().SetMinLevel(logger.LogLevel(*req.LogLevel))
+		logger.GetLogger().SetConsoleLevel(logger.LogLevel(*req.LogLevel))
 	}
 
 	WriteSuccess(w, map[string]interface{}{
@@ -169,11 +173,7 @@ func (h *Handler) handleConfigPort(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		h.config.UpdatePort(req.Port)
-
-		// Save to storage
-		adapter := storage.NewConfigStorageAdapter(h.storage)
-		if err := h.config.SaveToStorage(adapter); err != nil {
+		if err := h.persistRuntimeConfig(&req.Port, nil); err != nil {
 			logger.Error("Failed to save config: %v", err)
 			WriteError(w, http.StatusInternalServerError, "Failed to save configuration")
 			return
@@ -210,19 +210,14 @@ func (h *Handler) handleConfigLogLevel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		h.config.UpdateLogLevel(req.LogLevel)
-
-		// Update logger level
-		logger.GetLogger().SetMinLevel(logger.LogLevel(req.LogLevel))
-		logger.GetLogger().SetConsoleLevel(logger.LogLevel(req.LogLevel))
-
-		// Save to storage
-		adapter := storage.NewConfigStorageAdapter(h.storage)
-		if err := h.config.SaveToStorage(adapter); err != nil {
+		if err := h.persistRuntimeConfig(nil, &req.LogLevel); err != nil {
 			logger.Error("Failed to save config: %v", err)
 			WriteError(w, http.StatusInternalServerError, "Failed to save configuration")
 			return
 		}
+
+		logger.GetLogger().SetMinLevel(logger.LogLevel(req.LogLevel))
+		logger.GetLogger().SetConsoleLevel(logger.LogLevel(req.LogLevel))
 
 		WriteSuccess(w, map[string]interface{}{
 			"logLevel": req.LogLevel,
@@ -231,4 +226,66 @@ func (h *Handler) handleConfigLogLevel(w http.ResponseWriter, r *http.Request) {
 	default:
 		WriteError(w, http.StatusMethodNotAllowed, "Method not allowed")
 	}
+}
+
+func (h *Handler) persistBasicAuth(enabled *bool, username, password string) error {
+	h.configMu.Lock()
+	defer h.configMu.Unlock()
+
+	oldEnabled := h.config.GetBasicAuthEnabled()
+	oldUsername := h.config.GetBasicAuthUsername()
+	oldPassword := h.config.GetBasicAuthPassword()
+	newEnabled := oldEnabled
+	if enabled != nil {
+		newEnabled = *enabled
+	}
+	if username == "" {
+		username = oldUsername
+	}
+	if password == "" || password == "***" {
+		password = oldPassword
+	}
+	username = strings.TrimSpace(username)
+	if newEnabled && (username == "" || password == "") {
+		return errBasicAuthCredentialsRequired
+	}
+
+	h.config.UpdateBasicAuth(newEnabled, username, password)
+	if err := h.storage.SetConfigs(map[string]string{
+		"basicAuthEnabled":  strconv.FormatBool(newEnabled),
+		"basicAuthUsername": username,
+		"basicAuthPassword": password,
+	}); err != nil {
+		h.config.UpdateBasicAuth(oldEnabled, oldUsername, oldPassword)
+		return err
+	}
+	return nil
+}
+
+func (h *Handler) persistRuntimeConfig(port, logLevel *int) error {
+	h.configMu.Lock()
+	defer h.configMu.Unlock()
+
+	oldPort := h.config.GetPort()
+	oldLogLevel := h.config.GetLogLevel()
+	if port != nil {
+		h.config.UpdatePort(*port)
+	}
+	if logLevel != nil {
+		h.config.UpdateLogLevel(*logLevel)
+	}
+
+	values := make(map[string]string, 2)
+	if port != nil {
+		values["port"] = strconv.Itoa(*port)
+	}
+	if logLevel != nil {
+		values["logLevel"] = strconv.Itoa(*logLevel)
+	}
+	if err := h.storage.SetConfigs(values); err != nil {
+		h.config.UpdatePort(oldPort)
+		h.config.UpdateLogLevel(oldLogLevel)
+		return err
+	}
+	return nil
 }

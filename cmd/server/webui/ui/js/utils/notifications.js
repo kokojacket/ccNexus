@@ -1,4 +1,6 @@
 // Toast notification system
+import { t } from './i18n.js';
+
 class NotificationManager {
     constructor() {
         this.container = document.getElementById('toast-container');
@@ -7,6 +9,7 @@ class NotificationManager {
     show(message, type = 'info', duration = 3000) {
         const toast = document.createElement('div');
         toast.className = `toast ${type}`;
+        toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
 
         const icons = {
             success: '✓',
@@ -15,15 +18,25 @@ class NotificationManager {
             info: 'ℹ'
         };
 
-        toast.innerHTML = `
-            <span class="toast-icon">${icons[type] || icons.info}</span>
-            <div class="toast-content">
-                <div class="toast-message">${message}</div>
-            </div>
-            <button class="toast-close">×</button>
-        `;
+        const icon = document.createElement('span');
+        icon.className = 'toast-icon';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.textContent = icons[type] || icons.info;
 
-        const closeBtn = toast.querySelector('.toast-close');
+        const content = document.createElement('div');
+        content.className = 'toast-content';
+        const messageElement = document.createElement('div');
+        messageElement.className = 'toast-message';
+        messageElement.textContent = String(message);
+        content.appendChild(messageElement);
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'toast-close';
+        closeBtn.type = 'button';
+        closeBtn.setAttribute('aria-label', t('common.close'));
+        closeBtn.textContent = '×';
+        toast.append(icon, content, closeBtn);
+
         closeBtn.addEventListener('click', () => this.remove(toast));
 
         this.container.appendChild(toast);
@@ -36,7 +49,7 @@ class NotificationManager {
     }
 
     remove(toast) {
-        toast.style.animation = 'slideInRight 0.3s reverse';
+        toast.classList.add('is-leaving');
         setTimeout(() => {
             if (toast.parentNode) {
                 toast.parentNode.removeChild(toast);

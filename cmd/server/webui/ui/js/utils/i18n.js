@@ -7,6 +7,7 @@ export function setLanguage(lang) {
     if (translations[lang]) {
         currentLanguage = lang;
         localStorage.setItem('ccnexus-language', lang);
+        document.documentElement.lang = lang;
         // 触发语言切换事件，让所有组件重新渲染
         window.dispatchEvent(new CustomEvent('languageChanged', { detail: { language: lang } }));
     }
@@ -40,4 +41,5 @@ export function initLanguage() {
     if (saved && translations[saved]) {
         currentLanguage = saved;
     }
+    document.documentElement.lang = currentLanguage;
 }

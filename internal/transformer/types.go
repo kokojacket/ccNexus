@@ -201,7 +201,11 @@ type StreamContext struct {
 	// <think> tag handling for streaming text
 	InThinkingTag       bool   // Track if we are inside a <think> tag
 	ThinkingBuffer      string // Buffer for trailing partial tag detection
+	ThinkingTagClose    string // Closing tag paired with the active thinking tag
 	PendingThinkingText string // Buffered thinking text until closing tag arrives
+	// Claude -> Responses streaming fields
+	NextOutputIndex int
+	OutputText      string
 }
 
 // NewStreamContext creates a new stream context with default values
@@ -228,7 +232,10 @@ func NewStreamContext() *StreamContext {
 		ToolCallCounter:      0,
 		InThinkingTag:        false,
 		ThinkingBuffer:       "",
+		ThinkingTagClose:     "",
 		PendingThinkingText:  "",
+		NextOutputIndex:      0,
+		OutputText:           "",
 	}
 }
 

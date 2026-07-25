@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 
+	"github.com/lich0821/ccNexus/internal/config"
 	"github.com/lich0821/ccNexus/internal/logger"
 )
 
@@ -47,9 +49,20 @@ func WriteSuccess(w http.ResponseWriter, data interface{}) {
 // CORSMiddleware adds CORS headers to responses
 func CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			originURL, err := url.Parse(origin)
+			if err != nil || (originURL.Scheme != "http" && originURL.Scheme != "https") ||
+				originURL.Host == "" || !strings.EqualFold(originURL.Host, r.Host) {
+				WriteError(w, http.StatusForbidden, "Cross-origin requests are not allowed")
+				return
+			}
+
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Add("Vary", "Origin")
+		}
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -81,16 +94,11 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-type AuthConfig struct {
-	Enabled  bool
-	Username string
-	Password string
-}
-
-func BasicAuthMiddleware(auth AuthConfig) func(http.Handler) http.Handler {
+func BasicAuthMiddleware(cfg *config.Config) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !auth.Enabled {
+			enabled, expectedUsername, expectedPassword := cfg.GetBasicAuth()
+			if !enabled {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -128,8 +136,8 @@ func BasicAuthMiddleware(auth AuthConfig) func(http.Handler) http.Handler {
 			username := credentials[:colonIndex]
 			password := credentials[colonIndex+1:]
 
-			if subtle.ConstantTimeCompare([]byte(auth.Username), []byte(username)) != 1 ||
-				subtle.ConstantTimeCompare([]byte(auth.Password), []byte(password)) != 1 {
+			if subtle.ConstantTimeCompare([]byte(expectedUsername), []byte(username)) != 1 ||
+				subtle.ConstantTimeCompare([]byte(expectedPassword), []byte(password)) != 1 {
 				w.Header().Set("WWW-Authenticate", `Basic realm="ccNexus"`)
 				w.WriteHeader(http.StatusUnauthorized)
 				return
