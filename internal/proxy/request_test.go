@@ -1,12 +1,68 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/lich0821/ccNexus/internal/config"
 	"github.com/lich0821/ccNexus/internal/transformer/convert"
 )
+
+func TestOpenAIImageRequestsPreservePathAndPayload(t *testing.T) {
+	endpoint := config.Endpoint{
+		Name:        "Images",
+		APIUrl:      "https://api.example.com",
+		APIKey:      "secret",
+		AuthMode:    config.AuthModeAPIKey,
+		Transformer: "openai2",
+	}
+	payload := []byte(`{"model":"gpt-image-2","prompt":"a kitten","quality":"auto","size":"auto"}`)
+
+	for _, testCase := range []struct {
+		requestPath  string
+		upstreamPath string
+	}{
+		{requestPath: "/v1/images/generations", upstreamPath: "/v1/images/generations"},
+		{requestPath: "/images/generations", upstreamPath: "/v1/images/generations"},
+		{requestPath: "/v1/images/edits", upstreamPath: "/v1/images/edits"},
+		{requestPath: "/images/edits", upstreamPath: "/v1/images/edits"},
+	} {
+		t.Run(testCase.requestPath, func(t *testing.T) {
+			clientFormat := detectClientFormat(testCase.requestPath)
+			if clientFormat != ClientFormatOpenAIImages {
+				t.Fatalf("client format = %q, want %q", clientFormat, ClientFormatOpenAIImages)
+			}
+
+			trans, err := prepareTransformerForClient(clientFormat, endpoint, "gpt-image-2")
+			if err != nil {
+				t.Fatalf("prepare transformer: %v", err)
+			}
+			transformed, err := trans.TransformRequest(payload)
+			if err != nil {
+				t.Fatalf("transform request: %v", err)
+			}
+			incoming := httptest.NewRequest(http.MethodPost, testCase.requestPath, bytes.NewReader(payload))
+			outgoing, err := buildProxyRequest(incoming, endpoint, endpoint.APIKey, transformed, trans.Name(), "gpt-image-2", nil)
+			if err != nil {
+				t.Fatalf("build proxy request: %v", err)
+			}
+			if outgoing.URL.Path != testCase.upstreamPath {
+				t.Fatalf("upstream path = %q, want %q", outgoing.URL.Path, testCase.upstreamPath)
+			}
+			body, err := io.ReadAll(outgoing.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			if !bytes.Equal(body, payload) {
+				t.Fatalf("upstream payload = %s, want %s", body, payload)
+			}
+		})
+	}
+}
 
 func TestEnsureCodexResponsesPayload(t *testing.T) {
 	raw := []byte(`{"model":"gpt-4.1","stream":true}`)
