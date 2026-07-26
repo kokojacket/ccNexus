@@ -320,7 +320,17 @@ const (
 	ClientFormatClaude          ClientFormat = "claude"           // Claude Code: /v1/messages
 	ClientFormatOpenAIChat      ClientFormat = "openai_chat"      // Codex (chat): /v1/chat/completions
 	ClientFormatOpenAIResponses ClientFormat = "openai_responses" // Codex (responses): /v1/responses
+	ClientFormatOpenAIImages    ClientFormat = "openai_images"    // Codex ImageGen: /v1/images/*
 )
+
+func isOpenAIImagesPath(requestPath string) bool {
+	switch strings.TrimSuffix(requestPath, "/") {
+	case "/v1/images/generations", "/images/generations", "/v1/images/edits", "/images/edits":
+		return true
+	default:
+		return false
+	}
+}
 
 // detectClientFormat identifies the client format based on request path
 func detectClientFormat(path string) ClientFormat {
@@ -329,6 +339,8 @@ func detectClientFormat(path string) ClientFormat {
 		return ClientFormatOpenAIChat
 	case strings.HasPrefix(path, "/v1/responses") || strings.HasPrefix(path, "/responses"):
 		return ClientFormatOpenAIResponses
+	case isOpenAIImagesPath(path):
+		return ClientFormatOpenAIImages
 	default:
 		return ClientFormatClaude
 	}

@@ -44,6 +44,11 @@ func prepareTransformerForClient(clientFormat ClientFormat, endpoint config.Endp
 		return prepareCxChatTransformer(endpoint, endpointTransformer, effectiveModel)
 	case ClientFormatOpenAIResponses:
 		return prepareCxRespTransformer(endpoint, endpointTransformer, effectiveModel)
+	case ClientFormatOpenAIImages:
+		if endpointTransformer == "openai" || endpointTransformer == "openai2" {
+			return responses.NewOpenAI2Transformer(effectiveModel), nil
+		}
+		return nil, fmt.Errorf("unsupported endpoint transformer for OpenAI Images: %s", endpointTransformer)
 	}
 
 	return nil, fmt.Errorf("unsupported client format: %s", clientFormat)
@@ -103,6 +108,13 @@ func prepareCxRespTransformer(endpoint config.Endpoint, endpointTransformer stri
 
 // getTargetPath determines the target API path based on transformer name
 func getTargetPath(originalPath string, endpoint config.Endpoint, transformedBody []byte, transformerName string, modelName string) string {
+	if isOpenAIImagesPath(originalPath) {
+		imagePath := strings.TrimSuffix(originalPath, "/")
+		if strings.HasPrefix(imagePath, "/v1/") {
+			return imagePath
+		}
+		return "/v1" + imagePath
+	}
 	switch transformerName {
 	case "cc_claude", "cx_chat_claude", "cx_resp_claude":
 		return "/v1/messages"
@@ -244,8 +256,7 @@ func isCodexProviderType(providerType string) bool {
 	return p == "" || p == "codex"
 }
 
-// normalizeTargetPathForBaseURL adjusts OpenAI Responses paths for Codex backend base URLs.
-// This is endpoint URL compatibility handling and is independent from auth mode.
+// normalizeTargetPathForBaseURL adjusts target paths for endpoint base URL compatibility.
 func normalizeTargetPathForBaseURL(baseURL, targetPath string) string {
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || parsed == nil {
@@ -253,6 +264,9 @@ func normalizeTargetPathForBaseURL(baseURL, targetPath string) string {
 	}
 
 	cleanPath := path.Clean(strings.TrimSpace(parsed.Path))
+	if strings.HasSuffix(cleanPath, "/v1") && isOpenAIImagesPath(targetPath) {
+		return strings.TrimPrefix(strings.TrimSpace(targetPath), "/v1")
+	}
 	isCodexBackend := strings.HasSuffix(cleanPath, "/backend-api/codex")
 	if !isCodexBackend {
 		return targetPath

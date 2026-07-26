@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/lich0821/ccNexus/internal/config"
@@ -48,9 +49,20 @@ func WriteSuccess(w http.ResponseWriter, data interface{}) {
 // CORSMiddleware adds CORS headers to responses
 func CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			originURL, err := url.Parse(origin)
+			if err != nil || (originURL.Scheme != "http" && originURL.Scheme != "https") ||
+				originURL.Host == "" || !strings.EqualFold(originURL.Host, r.Host) {
+				WriteError(w, http.StatusForbidden, "Cross-origin requests are not allowed")
+				return
+			}
+
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Add("Vary", "Origin")
+		}
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)

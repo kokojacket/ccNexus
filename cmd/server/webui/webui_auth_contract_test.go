@@ -90,3 +90,18 @@ func TestBasicAuthChangesApplyImmediatelyToAPIAndUI(t *testing.T) {
 		requireWebUIStatus(t, mux, path, "", "", http.StatusOK)
 	}
 }
+func TestAPIRoutesApplySameOriginPolicy(t *testing.T) {
+	mux := http.NewServeMux()
+	if err := New(config.DefaultConfig(), nil, nil).RegisterRoutes(mux); err != nil {
+		t.Fatalf("register routes: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:6677/api/not-found", nil)
+	req.Header.Set("Origin", "https://attacker.example")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin API status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}

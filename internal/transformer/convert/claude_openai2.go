@@ -70,14 +70,7 @@ func ClaudeReqToOpenAI2(claudeReq []byte, model string) ([]byte, error) {
 		if mapped := mapClaudeToolChoiceToOpenAI2(req.ToolChoice); mapped != nil {
 			openai2Req["tool_choice"] = mapped
 		} else {
-			// For first turn, prefer required to avoid "plan-only" responses.
-			// After at least one tool_result exists, switch to auto to prevent
-			// forced repeated tool calls in later turns.
-			if hasClaudeToolResult(req.Messages) {
-				openai2Req["tool_choice"] = "auto"
-			} else {
-				openai2Req["tool_choice"] = "required"
-			}
+			openai2Req["tool_choice"] = "auto"
 		}
 	}
 
@@ -117,25 +110,6 @@ func mapClaudeToolChoiceToOpenAI2(toolChoice interface{}) interface{} {
 	}
 
 	return nil
-}
-
-func hasClaudeToolResult(messages []transformer.ClaudeMessage) bool {
-	for _, msg := range messages {
-		blocks, ok := msg.Content.([]interface{})
-		if !ok {
-			continue
-		}
-		for _, block := range blocks {
-			m, ok := block.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			if t, _ := m["type"].(string); t == "tool_result" {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // OpenAI2ReqToClaude converts OpenAI Responses API request to Claude request

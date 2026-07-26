@@ -30,7 +30,7 @@ func New(cfg *config.Config, p *proxy.Proxy, storage *storage.SQLiteStorage) *We
 
 // RegisterRoutes registers all web UI routes to the provided mux
 func (w *WebUI) RegisterRoutes(mux *http.ServeMux) error {
-	mux.HandleFunc("/api/", w.apiHandler.ServeHTTP)
+	mux.Handle("/api/", api.CORSMiddleware(w.apiHandler))
 
 	authMiddleware := api.BasicAuthMiddleware(w.cfg)
 

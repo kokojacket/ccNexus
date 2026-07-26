@@ -392,7 +392,7 @@ func TestClaudeReqToOpenAI2MapsNamedToolChoice(t *testing.T) {
 	}
 }
 
-func TestClaudeReqToOpenAI2DefaultsToolChoiceRequiredWhenToolsPresent(t *testing.T) {
+func TestClaudeReqToOpenAI2DefaultsToolChoiceAutoWhenToolsPresent(t *testing.T) {
 	claudeReq := `{
 		"model": "claude-sonnet-4-20250514",
 		"stream": true,
@@ -410,8 +410,8 @@ func TestClaudeReqToOpenAI2DefaultsToolChoiceRequiredWhenToolsPresent(t *testing
 		t.Fatalf("unmarshal transformed req failed: %v", err)
 	}
 
-	if req["tool_choice"] != "required" {
-		t.Fatalf("expected tool_choice=required, got %#v", req["tool_choice"])
+	if req["tool_choice"] != "auto" {
+		t.Fatalf("expected tool_choice=auto, got %#v", req["tool_choice"])
 	}
 }
 
