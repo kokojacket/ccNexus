@@ -203,18 +203,21 @@ func (p *Proxy) prepareEndpointAttempt(reqCtx *proxyRequestContext, attempt *end
 	logger.DebugLog("[%s] Transformer: %s", attempt.endpoint.Name, attempt.transformerName)
 	logger.DebugLog("[%s] Transformed Request: %s", attempt.endpoint.Name, string(transformedBody))
 
-	if reqCtx.modelOverride != "" {
-		transformedBody = overrideModelInPayload(transformedBody, reqCtx.modelOverride)
-		logger.DebugLog("[%s] 应用模型覆盖后的请求: %s", attempt.endpoint.Name, string(transformedBody))
-	}
+	cleanedBody := transformedBody
+	if reqCtx.clientFormat != ClientFormatOpenAIImages {
+		if reqCtx.modelOverride != "" {
+			cleanedBody = overrideModelInPayload(cleanedBody, reqCtx.modelOverride)
+			logger.DebugLog("[%s] 应用模型覆盖后的请求: %s", attempt.endpoint.Name, string(cleanedBody))
+		}
 
-	cleanedBody, err := cleanIncompleteToolCalls(transformedBody)
-	if err != nil {
-		logger.Warn("[%s] Failed to clean tool calls: %v", attempt.endpoint.Name, err)
-		cleanedBody = transformedBody
-	}
-	if shouldOverridePayloadModel(attempt.transformerName) && attempt.modelName != "" {
-		cleanedBody = overrideModelInPayload(cleanedBody, attempt.modelName)
+		cleanedBody, err = cleanIncompleteToolCalls(cleanedBody)
+		if err != nil {
+			logger.Warn("[%s] Failed to clean tool calls: %v", attempt.endpoint.Name, err)
+			cleanedBody = transformedBody
+		}
+		if shouldOverridePayloadModel(attempt.transformerName) && attempt.modelName != "" {
+			cleanedBody = overrideModelInPayload(cleanedBody, attempt.modelName)
+		}
 	}
 	attempt.transformedBody = cleanedBody
 	attempt.thinkingEnabled = detectThinkingEnabled(attempt.transformerName, attempt.transformedBody)
