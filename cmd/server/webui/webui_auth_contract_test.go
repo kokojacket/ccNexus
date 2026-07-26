@@ -90,6 +90,7 @@ func TestBasicAuthChangesApplyImmediatelyToAPIAndUI(t *testing.T) {
 		requireWebUIStatus(t, mux, path, "", "", http.StatusOK)
 	}
 }
+
 func TestAPIRoutesApplySameOriginPolicy(t *testing.T) {
 	mux := http.NewServeMux()
 	if err := New(config.DefaultConfig(), nil, nil).RegisterRoutes(mux); err != nil {
