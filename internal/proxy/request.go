@@ -44,6 +44,11 @@ func prepareTransformerForClient(clientFormat ClientFormat, endpoint config.Endp
 		return prepareCxChatTransformer(endpoint, endpointTransformer, effectiveModel)
 	case ClientFormatOpenAIResponses:
 		return prepareCxRespTransformer(endpoint, endpointTransformer, effectiveModel)
+	case ClientFormatOpenAIImages:
+		if endpointTransformer == "openai" || endpointTransformer == "openai2" {
+			return responses.NewOpenAI2Transformer(effectiveModel), nil
+		}
+		return nil, fmt.Errorf("unsupported endpoint transformer for OpenAI Images: %s", endpointTransformer)
 	}
 
 	return nil, fmt.Errorf("unsupported client format: %s", clientFormat)
@@ -103,6 +108,13 @@ func prepareCxRespTransformer(endpoint config.Endpoint, endpointTransformer stri
 
 // getTargetPath determines the target API path based on transformer name
 func getTargetPath(originalPath string, endpoint config.Endpoint, transformedBody []byte, transformerName string, modelName string) string {
+	if isOpenAIImagesPath(originalPath) {
+		imagePath := strings.TrimSuffix(originalPath, "/")
+		if strings.HasPrefix(imagePath, "/v1/") {
+			return imagePath
+		}
+		return "/v1" + imagePath
+	}
 	switch transformerName {
 	case "cc_claude", "cx_chat_claude", "cx_resp_claude":
 		return "/v1/messages"
